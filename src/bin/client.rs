@@ -17,9 +17,9 @@ async fn main() -> Result<()> {
     match client
         .start_workflow(
             vec![],
-            "build".to_string(),
+            "main".to_string(),
             "zGtLfDcgmBqBUya1qTpzRzpBpoHx-86b1a059da167ae0a4da82e3168c789e73884f5e".to_string(),
-            "build".to_string(),
+            "golden_path".to_string(),
             None,
             WorkflowOptions {
                 ..Default::default()
