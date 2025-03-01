@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Image {
-    registry: String,
-    repository: String,
-    tag: String,
+    pub registry: String,
+    pub repository: String,
+    pub tag: String,
 }
 
 impl Image {

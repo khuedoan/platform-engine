@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
-use app_engine::temporal;
+use app_engine::{core::app::source::Source, temporal};
 use temporal_client::{tonic::Code, WorkflowOptions};
 use temporal_sdk_core::WorkflowClientTrait;
+use temporal_sdk_core_protos::coresdk::AsJsonPayloadExt;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -13,10 +14,16 @@ async fn main() -> Result<()> {
         .init();
 
     let client = temporal::get_client().await?;
+    let input = vec![Source::Git {
+        name: "example-service".to_string(),
+        url: "https://github.com/khuedoan/example-service".to_string(),
+        revision: "828c31f942e8913ab2af53a2841c180586c5b7e1".to_string(),
+    }
+    .as_json_payload()?];
 
     match client
         .start_workflow(
-            vec![],
+            input,
             "main".to_string(),
             "zGtLfDcgmBqBUya1qTpzRzpBpoHx-86b1a059da167ae0a4da82e3168c789e73884f5e".to_string(),
             "golden_path".to_string(),
