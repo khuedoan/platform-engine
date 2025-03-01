@@ -16,6 +16,8 @@
         packages = [
           cargo
           clippy
+          openssl
+          pkg-config
           protobuf
           rustc
           rustfmt

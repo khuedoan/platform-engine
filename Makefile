@@ -11,5 +11,9 @@ fmt:
 lint:
 	cargo clippy -- --deny warnings
 
-test:
+testdata:
+	git clone https://github.com/khuedoan/horus testdata/gitops
+	git clone https://github.com/khuedoan/blog testdata/app
+
+test: testdata
 	cargo test
