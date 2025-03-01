@@ -48,7 +48,7 @@ impl Source {
         match self {
             Source::Git { path, .. } => {
                 if path.join("Dockerfile").exists() {
-                    Ok(Builder::Dockerfile)
+                    Ok(Builder::Dockerfile(path.to_path_buf()))
                 } else if Command::new("nixpacks")
                     .args(&["detect", "."])
                     .current_dir(path)
@@ -59,7 +59,7 @@ impl Source {
                     // TODO nixpacks has interesting stdout
                     > 1
                 {
-                    Ok(Builder::Nixpacks)
+                    Ok(Builder::Nixpacks(path.to_path_buf()))
                 } else {
                     Err(anyhow::anyhow!("no buildable code detected"))
                 }
@@ -95,7 +95,7 @@ mod tests {
             name: "".to_string(),
             url: "".to_string(),
             revision: "".to_string(),
-            path: PathBuf::from("testdata/blog"),
+            path: PathBuf::from("testdata/example-service"),
         };
         let builder = source.detect_builder().await.unwrap();
 
