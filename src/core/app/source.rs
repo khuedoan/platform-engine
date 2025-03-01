@@ -1,10 +1,9 @@
-use std::path::Path;
-
 use super::{builder::Builder, image::Image};
 use anyhow::Result;
 use git2::{FetchOptions, Oid, Repository};
 use serde::{Deserialize, Serialize};
-use tokio::fs::remove_dir_all;
+use std::path::PathBuf;
+use tokio::{fs::remove_dir_all, process::Command};
 use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +12,7 @@ pub enum Source {
         name: String,
         url: String,
         revision: String,
+        path: PathBuf,
     },
     Docker(Image),
 }
@@ -21,11 +21,11 @@ impl Source {
     pub async fn pull(&self) -> Result<()> {
         match self {
             Source::Git {
-                name,
                 url,
                 revision,
+                path,
+                ..
             } => {
-                let path = Path::new("/tmp/workspace").join(name).join(revision);
                 if path.exists() {
                     warn!("removing existing workspace at {path:?}");
                     remove_dir_all(&path).await?;
@@ -46,11 +46,24 @@ impl Source {
 
     pub async fn detect_builder(&self) -> Result<Builder> {
         match self {
-            Source::Git {
-                name,
-                url,
-                revision,
-            } => todo!(),
+            Source::Git { path, .. } => {
+                if path.join("Dockerfile").exists() {
+                    Ok(Builder::Dockerfile)
+                } else if Command::new("nixpacks")
+                    .args(&["detect", "."])
+                    .current_dir(path)
+                    .output()
+                    .await?
+                    .stdout
+                    .len()
+                    // TODO nixpacks has interesting stdout
+                    > 1
+                {
+                    Ok(Builder::Nixpacks)
+                } else {
+                    Err(anyhow::anyhow!("no buildable code detected"))
+                }
+            }
             Source::Docker(image) => Ok(Builder::Vendor(image.clone())),
         }
     }
@@ -62,16 +75,43 @@ mod tests {
 
     #[tokio::test]
     async fn test_pull_git() {
+        let path = PathBuf::from(
+            "/tmp/workspace/example-service/828c31f942e8913ab2af53a2841c180586c5b7e1",
+        );
         let source = Source::Git {
-            name: "example-service".to_string(),
+            name: "".to_string(),
             url: "https://github.com/khuedoan/example-service".to_string(),
             revision: "828c31f942e8913ab2af53a2841c180586c5b7e1".to_string(),
+            path: path.clone(),
         };
         source.pull().await.unwrap();
 
-        assert!(Path::new(
-            "/tmp/workspace/example-service/828c31f942e8913ab2af53a2841c180586c5b7e1/README.md"
-        )
-        .exists());
+        assert!(path.join("README.md").exists());
+    }
+
+    #[tokio::test]
+    async fn test_detect_builder_nixpacks() {
+        let source = Source::Git {
+            name: "".to_string(),
+            url: "".to_string(),
+            revision: "".to_string(),
+            path: PathBuf::from("testdata/blog"),
+        };
+        let builder = source.detect_builder().await.unwrap();
+
+        assert!(matches!(builder, Builder::Nixpacks { .. }))
+    }
+
+    #[tokio::test]
+    async fn test_detect_builder_dockerfile() {
+        let source = Source::Git {
+            name: "".to_string(),
+            url: "".to_string(),
+            revision: "".to_string(),
+            path: PathBuf::from("testdata/micropaas"),
+        };
+        let builder = source.detect_builder().await.unwrap();
+
+        assert!(matches!(builder, Builder::Dockerfile { .. }))
     }
 }

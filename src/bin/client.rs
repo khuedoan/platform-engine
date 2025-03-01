@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use app_engine::{core::app::source::Source, temporal};
+use std::path::PathBuf;
 use temporal_client::{tonic::Code, WorkflowOptions};
 use temporal_sdk_core::WorkflowClientTrait;
 use temporal_sdk_core_protos::coresdk::AsJsonPayloadExt;
@@ -18,6 +19,7 @@ async fn main() -> Result<()> {
         name: "example-service".to_string(),
         url: "https://github.com/khuedoan/example-service".to_string(),
         revision: "828c31f942e8913ab2af53a2841c180586c5b7e1".to_string(),
+        path: PathBuf::from("/tmp/example-service/828c31f942e8913ab2af53a2841c180586c5b7e1"),
     }
     .as_json_payload()?];
 

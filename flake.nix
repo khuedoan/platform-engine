@@ -16,6 +16,7 @@
         packages = [
           cargo
           clippy
+          nixpacks
           openssl
           pkg-config
           protobuf

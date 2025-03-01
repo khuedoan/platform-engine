@@ -12,8 +12,9 @@ lint:
 	cargo clippy -- --deny warnings
 
 testdata:
-	git clone https://github.com/khuedoan/horus testdata/gitops
-	git clone https://github.com/khuedoan/blog testdata/app
+	git clone https://github.com/khuedoan/horus testdata/horus
+	git clone https://github.com/khuedoan/blog testdata/blog
+	git clone https://github.com/khuedoan/micropaas testdata/micropaas
 
 test: testdata
 	cargo test
