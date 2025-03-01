@@ -1,9 +1,11 @@
 use super::image::Image;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::process::Command;
 use tracing::info;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Builder {
     Dockerfile(PathBuf),
     Nixpacks(PathBuf),

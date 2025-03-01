@@ -1,7 +1,6 @@
+use crate::core::app::source::Source;
 use anyhow::{anyhow, Result};
 use temporal_sdk::{ActContext, ActivityError};
-
-use crate::core::app::source::Source;
 
 pub fn name() -> String {
     "app_source_pull".to_string()
