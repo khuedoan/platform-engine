@@ -1,5 +1,5 @@
 use anyhow::Result;
-use app_engine::{temporal, workflows};
+use app_engine::{activities, temporal, workflows};
 use std::sync::Arc;
 use temporal_sdk::Worker;
 use temporal_sdk_core::{init_worker, CoreRuntime, WorkerConfigBuilder};
@@ -26,7 +26,12 @@ async fn main() -> Result<()> {
     let core_worker = init_worker(&runtime, worker_config, client)?;
     let mut worker = Worker::new_from_core(Arc::new(core_worker), "main");
 
+    worker.register_activity(
+        activities::app_source_pull::name(),
+        activities::app_source_pull::run,
+    );
     worker.register_wf(workflows::golden_path::name(), workflows::golden_path::run);
+
     worker.run().await?;
 
     Ok(())

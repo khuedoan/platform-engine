@@ -1,6 +1,7 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Image {
     registry: String,
     repository: String,

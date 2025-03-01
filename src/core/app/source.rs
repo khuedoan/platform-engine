@@ -3,10 +3,11 @@ use std::path::Path;
 use super::{builder::Builder, image::Image};
 use anyhow::Result;
 use git2::{FetchOptions, Oid, Repository};
+use serde::{Deserialize, Serialize};
 use tokio::fs::remove_dir_all;
 use tracing::warn;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Source {
     Git {
         name: String,
