@@ -2,7 +2,7 @@ use std::path::Path;
 
 use super::{builder::Builder, image::Image};
 use anyhow::Result;
-use git2::Repository;
+use git2::{FetchOptions, Oid, Repository};
 use tokio::fs::remove_dir_all;
 use tracing::warn;
 
@@ -29,8 +29,11 @@ impl Source {
                     warn!("removing existing workspace at {path:?}");
                     remove_dir_all(&path).await?;
                 }
-                let repo = Repository::clone(url, &path)?;
-                let object = repo.revparse_single(revision)?;
+
+                let repo = Repository::init(&path)?;
+                let mut remote = repo.remote("origin", url)?;
+                remote.fetch(&[revision], Some(FetchOptions::new().depth(1)), None)?;
+                let object = repo.find_object(Oid::from_str(revision)?, None)?;
                 repo.checkout_tree(&object, None)?;
                 repo.set_head_detached(object.id())?;
 
