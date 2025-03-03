@@ -49,7 +49,7 @@ impl Builder {
 
                 Ok(image.clone())
             }
-            Builder::Vendor(image) => image.tag().await,
+            Builder::Vendor(image) => image.rename().await,
         }
     }
 }

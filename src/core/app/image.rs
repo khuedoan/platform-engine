@@ -16,7 +16,7 @@ impl fmt::Display for Image {
 }
 
 impl Image {
-    pub async fn tag(&self) -> Result<Image> {
+    pub async fn rename(&self) -> Result<Self> {
         todo!()
     }
 

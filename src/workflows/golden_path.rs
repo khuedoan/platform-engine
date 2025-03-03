@@ -22,40 +22,44 @@ pub async fn run(ctx: WfContext) -> WorkflowResult<Image> {
     )?;
     info!("starting golden path: {source:?}");
 
-    let _pull_handle = ctx
-        .activity(ActivityOptions {
+    let _source: Source = serde_json::from_slice(
+        &ctx.activity(ActivityOptions {
             activity_type: activities::app_source_pull::name(),
             input: source.as_json_payload()?,
             start_to_close_timeout: Some(Duration::from_secs(120)),
             ..Default::default()
         })
         .await
-        .success_payload_or_error()?;
+        .success_payload_or_error()?
+        .ok_or(anyhow!("missing payload"))?
+        .data,
+    )?;
 
-    let detect_handle = ctx
-        .activity(ActivityOptions {
+    let builder: Builder = serde_json::from_slice(
+        &ctx.activity(ActivityOptions {
             activity_type: activities::app_source_detect::name(),
             input: source.as_json_payload()?,
             start_to_close_timeout: Some(Duration::from_secs(120)),
             ..Default::default()
         })
         .await
-        .success_payload_or_error()?;
+        .success_payload_or_error()?
+        .ok_or(anyhow!("missing payload"))?
+        .data,
+    )?;
 
-    // TODO handle unwrap
-    let builder: Builder = serde_json::from_slice(&detect_handle.unwrap().data)?;
-
-    let build_handle = ctx
-        .activity(ActivityOptions {
+    let image: Image = serde_json::from_slice(
+        &ctx.activity(ActivityOptions {
             activity_type: activities::app_build::name(),
             input: builder.as_json_payload()?,
             start_to_close_timeout: Some(Duration::from_secs(600)),
             ..Default::default()
         })
         .await
-        .success_payload_or_error()?;
-
-    let image: Image = serde_json::from_slice(&build_handle.unwrap().data)?;
+        .success_payload_or_error()?
+        .ok_or(anyhow!("missing payload"))?
+        .data,
+    )?;
 
     Ok(WfExitValue::Normal(image))
 }
