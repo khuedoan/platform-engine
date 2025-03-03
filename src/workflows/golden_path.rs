@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::{
-    activities,
+    activities::{self, app_build, app_source_detect, app_source_pull},
     core::app::{builder::Builder, image::Image, source::Source},
 };
 use anyhow::anyhow;
@@ -22,10 +22,10 @@ pub async fn run(ctx: WfContext) -> WorkflowResult<Image> {
     )?;
     info!("starting golden path: {source:?}");
 
-    let _source: Source = serde_json::from_slice(
+    let pulled_source: Source = serde_json::from_slice(
         &ctx.activity(ActivityOptions {
             activity_type: activities::app_source_pull::name(),
-            input: source.as_json_payload()?,
+            input: app_source_pull::Input { source }.as_json_payload()?,
             start_to_close_timeout: Some(Duration::from_secs(120)),
             ..Default::default()
         })
@@ -38,7 +38,10 @@ pub async fn run(ctx: WfContext) -> WorkflowResult<Image> {
     let builder: Builder = serde_json::from_slice(
         &ctx.activity(ActivityOptions {
             activity_type: activities::app_source_detect::name(),
-            input: source.as_json_payload()?,
+            input: app_source_detect::Input {
+                source: pulled_source,
+            }
+            .as_json_payload()?,
             start_to_close_timeout: Some(Duration::from_secs(120)),
             ..Default::default()
         })
@@ -51,7 +54,7 @@ pub async fn run(ctx: WfContext) -> WorkflowResult<Image> {
     let image: Image = serde_json::from_slice(
         &ctx.activity(ActivityOptions {
             activity_type: activities::app_build::name(),
-            input: builder.as_json_payload()?,
+            input: app_build::Input { builder }.as_json_payload()?,
             start_to_close_timeout: Some(Duration::from_secs(600)),
             ..Default::default()
         })

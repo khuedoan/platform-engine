@@ -18,7 +18,7 @@ pub enum Source {
 }
 
 impl Source {
-    pub async fn pull(&self) -> Result<()> {
+    pub async fn pull(&self) -> Result<Self> {
         match self {
             Source::Git {
                 url,
@@ -31,26 +31,41 @@ impl Source {
                     remove_dir_all(&path).await?;
                 }
 
-                let repo = Repository::init(&path)?;
+                let repo = Repository::init(path)?;
                 let mut remote = repo.remote("origin", url)?;
                 remote.fetch(&[revision], Some(FetchOptions::new().depth(1)), None)?;
                 let object = repo.find_object(Oid::from_str(revision)?, None)?;
                 repo.checkout_tree(&object, None)?;
                 repo.set_head_detached(object.id())?;
 
-                Ok(())
+                Ok(self.clone())
             }
             Source::Docker(_image) => todo!(),
         }
     }
 
     pub async fn detect_builder(&self) -> Result<Builder> {
+        // TODO obviously
+        let registry = "localhost:5000";
+
         match self {
-            Source::Git { path, .. } => {
+            Source::Git {
+                name,
+                revision,
+                path,
+                ..
+            } => {
                 if path.join("Dockerfile").exists() {
-                    Ok(Builder::Dockerfile(path.to_path_buf()))
+                    Ok(Builder::Dockerfile(
+                        path.to_path_buf(),
+                        Image {
+                            registry: registry.to_string(),
+                            repository: name.to_string(),
+                            tag: revision.to_string(),
+                        },
+                    ))
                 } else if Command::new("nixpacks")
-                    .args(&["detect", "."])
+                    .args(["detect", "."])
                     .current_dir(path)
                     .output()
                     .await?
@@ -59,12 +74,26 @@ impl Source {
                     // TODO nixpacks has interesting stdout
                     > 1
                 {
-                    Ok(Builder::Nixpacks(path.to_path_buf()))
+                    Ok(Builder::Nixpacks(
+                        path.to_path_buf(),
+                        Image {
+                            registry: registry.to_string(),
+                            repository: name.to_string(),
+                            tag: revision.to_string(),
+                        },
+                    ))
                 } else {
                     Err(anyhow::anyhow!("no buildable code detected"))
                 }
             }
-            Source::Docker(image) => Ok(Builder::Vendor(image.clone())),
+            Source::Docker(image) => Ok(Builder::Vendor(
+                image.clone(),
+                Image {
+                    registry: registry.to_string(),
+                    repository: image.repository.clone(),
+                    tag: image.tag.clone(),
+                },
+            )),
         }
     }
 }

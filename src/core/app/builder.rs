@@ -1,4 +1,4 @@
-use super::image::Image;
+use super::{image::Image, source::Source};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -7,18 +7,18 @@ use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Builder {
-    Dockerfile(PathBuf),
-    Nixpacks(PathBuf),
-    Vendor(Image),
+    Dockerfile(PathBuf, Image),
+    Nixpacks(PathBuf, Image),
+    Vendor(Image, Image),
 }
 
 impl Builder {
-    pub async fn build(&self, image: Image) -> Result<Image> {
+    pub async fn build(&self) -> Result<Image> {
         match self {
-            Builder::Dockerfile(path) => {
+            Builder::Dockerfile(path, image) => {
                 info!("building container image with Dockerfile");
                 let output = Command::new("docker")
-                    .args(&["build", ".", "--tag", &format!("{image}")])
+                    .args(["build", ".", "--tag", &format!("{image}")])
                     .current_dir(path)
                     .output()
                     .await?;
@@ -32,10 +32,10 @@ impl Builder {
 
                 Ok(image.clone())
             }
-            Builder::Nixpacks(path) => {
+            Builder::Nixpacks(path, image) => {
                 info!("building container image with Nixpacks");
                 let output = Command::new("nixpacks")
-                    .args(&["build", ".", "--tag", &format!("{image}")])
+                    .args(["build", ".", "--tag", &format!("{image}")])
                     .current_dir(path)
                     .output()
                     .await?;
@@ -49,7 +49,7 @@ impl Builder {
 
                 Ok(image.clone())
             }
-            Builder::Vendor(image) => image.rename().await,
+            Builder::Vendor(source_image, _image) => source_image.rename().await,
         }
     }
 }
@@ -60,27 +60,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_dockerfile() {
-        let builder = Builder::Dockerfile(PathBuf::from("testdata/micropaas"));
-        builder
-            .build(Image {
+        let builder = Builder::Dockerfile(
+            PathBuf::from("testdata/micropaas"),
+            Image {
                 registry: "localhost".to_string(),
-                repository: "test-build-docker".to_string(),
+                repository: "test-build-dockerfile".to_string(),
                 tag: "latest".to_string(),
-            })
-            .await
-            .unwrap();
+            },
+        );
+        builder.build().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_build_nixpacks() {
-        let builder = Builder::Nixpacks(PathBuf::from("testdata/example-service"));
-        builder
-            .build(Image {
+        let builder = Builder::Nixpacks(
+            PathBuf::from("testdata/example-service"),
+            Image {
                 registry: "localhost".to_string(),
                 repository: "test-build-nixpacks".to_string(),
                 tag: "latest".to_string(),
-            })
-            .await
-            .unwrap();
+            },
+        );
+        builder.build().await.unwrap();
     }
 }
