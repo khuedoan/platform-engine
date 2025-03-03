@@ -9,3 +9,7 @@ services:
     ports:
       - 7233:7233
       - 8233:8233
+  registry:
+    image: ghcr.io/project-zot/zot:v2.1.2
+    ports:
+      - 5000:5000

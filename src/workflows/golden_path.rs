@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::{
-    activities::{self, app_build, app_source_detect, app_source_pull},
+    activities::{self, app_build, app_source_detect, app_source_pull, image_push},
     core::app::{builder::Builder, image::Image, source::Source},
 };
 use anyhow::anyhow;
@@ -55,6 +55,19 @@ pub async fn run(ctx: WfContext) -> WorkflowResult<Image> {
         &ctx.activity(ActivityOptions {
             activity_type: activities::app_build::name(),
             input: app_build::Input { builder }.as_json_payload()?,
+            start_to_close_timeout: Some(Duration::from_secs(600)),
+            ..Default::default()
+        })
+        .await
+        .success_payload_or_error()?
+        .ok_or(anyhow!("missing payload"))?
+        .data,
+    )?;
+
+    let image: Image = serde_json::from_slice(
+        &ctx.activity(ActivityOptions {
+            activity_type: activities::image_push::name(),
+            input: image_push::Input { image }.as_json_payload()?,
             start_to_close_timeout: Some(Duration::from_secs(600)),
             ..Default::default()
         })

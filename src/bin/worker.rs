@@ -35,6 +35,7 @@ async fn main() -> Result<()> {
         activities::app_source_detect::run,
     );
     worker.register_activity(activities::app_build::name(), activities::app_build::run);
+    worker.register_activity(activities::image_push::name(), activities::image_push::run);
     worker.register_wf(workflows::golden_path::name(), workflows::golden_path::run);
 
     worker.run().await?;
