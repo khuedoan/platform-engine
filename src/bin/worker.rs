@@ -1,5 +1,5 @@
 use anyhow::Result;
-use app_engine::{activities, temporal, workflows};
+use app_engine::{activities::*, temporal, workflows};
 use std::sync::Arc;
 use temporal_sdk::Worker;
 use temporal_sdk_core::{init_worker, CoreRuntime, WorkerConfigBuilder};
@@ -26,17 +26,14 @@ async fn main() -> Result<()> {
     let core_worker = init_worker(&runtime, worker_config, client)?;
     let mut worker = Worker::new_from_core(Arc::new(core_worker), "main");
 
-    worker.register_activity(
-        activities::app_source_pull::name(),
-        activities::app_source_pull::run,
+    worker.register_activity("app_source_pull", app_source_pull);
+    worker.register_activity("app_source_detect", app_source_detect);
+    worker.register_activity("app_build", app_build);
+    worker.register_activity("image_push", image_push);
+    worker.register_wf(
+        workflows::golden_path::name(),
+        workflows::golden_path::definition,
     );
-    worker.register_activity(
-        activities::app_source_detect::name(),
-        activities::app_source_detect::run,
-    );
-    worker.register_activity(activities::app_build::name(), activities::app_build::run);
-    worker.register_activity(activities::image_push::name(), activities::image_push::run);
-    worker.register_wf(workflows::golden_path::name(), workflows::golden_path::run);
 
     worker.run().await?;
 

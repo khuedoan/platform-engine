@@ -5,8 +5,8 @@ dev:
 	bacon run
 
 fmt:
-	cargo fmt
 	cargo clippy --fix --allow-staged
+	cargo fmt
 
 lint:
 	cargo clippy -- --deny warnings

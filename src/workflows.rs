@@ -15,7 +15,7 @@ pub async fn start_workflow(client: &RetryClient<Client>, source: Source) -> Res
             input,
             "main".to_string(),
             "zGtLfDcgmBqBUya1qTpzRzpBpoHx-86b1a059da167ae0a4da82e3168c789e73884f5e".to_string(),
-            "golden_path".to_string(),
+            golden_path::name(),
             None,
             WorkflowOptions {
                 ..Default::default()
