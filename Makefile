@@ -24,9 +24,10 @@ testdata:
 	git clone https://github.com/khuedoan/micropaas testdata/micropaas
 
 test: testdata
-	bacon test
+	cargo nextest run
 
 clean:
+	docker compose down --volumes
 	rm -rf /tmp/workspace
-	docker image remove localhost/test-build-docker:latest
-	docker image remove localhost/test-build-nixpacks:latest
+	docker image remove localhost:5000/test-build-dockerfile:latest
+	docker image remove localhost:5000/test-build-nixpacks:latest
