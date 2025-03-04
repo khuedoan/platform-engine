@@ -1,33 +1,26 @@
 use anyhow::Result;
 
 #[derive(Debug, Clone)]
-pub struct GitOps {
-    repo: String,
-}
+pub struct GitOps {}
 
-pub struct Namespace {
-    name: String,
-}
+pub struct Namespace {}
 
-pub struct App {
-    name: String,
-    namespace: Namespace,
-}
+pub struct App {}
 
 impl GitOps {
-    pub async fn create_namespace(&self, name: String) -> Result<Namespace> {
-        Ok(Namespace { name })
+    pub async fn create_namespace(&self, _name: String) -> Result<Namespace> {
+        Ok(Namespace {})
     }
 
-    pub async fn get_namespace(&self, name: String) -> Result<Namespace> {
-        Ok(Namespace { name })
+    pub async fn get_namespace(&self, _name: String) -> Result<Namespace> {
+        Ok(Namespace {})
     }
 
-    pub async fn create_app(&self, namespace: Namespace, name: String) -> Result<App> {
-        Ok(App { namespace, name })
+    pub async fn create_app(&self, _namespace: Namespace, _name: String) -> Result<App> {
+        Ok(App {})
     }
 
-    pub async fn get_app(&self, namespace: Namespace, name: String) -> Result<App> {
-        Ok(App { namespace, name })
+    pub async fn get_app(&self, _namespace: Namespace, _name: String) -> Result<App> {
+        Ok(App {})
     }
 }

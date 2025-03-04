@@ -1,5 +1,12 @@
 # App Engine
 
+## Development
+
+```sh
+make dev
+make test
+```
+
 ## Project structure
 
 - `src/`

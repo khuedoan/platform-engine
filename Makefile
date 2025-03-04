@@ -1,9 +1,8 @@
-.PHONY: default dev fmt lint test
+.PHONY: default dev fmt lint test clean
 
 dev:
 	docker compose up --detach
-	cargo run --bin client
-	cargo run --bin worker
+	bacon run
 
 fmt:
 	cargo fmt
@@ -17,7 +16,9 @@ testdata:
 	git clone https://github.com/khuedoan/micropaas testdata/micropaas
 
 test: testdata
-	cargo test
+	bacon test
+
+clean:
 	rm -rf /tmp/workspace
 	docker image remove localhost/test-build-docker:latest
 	docker image remove localhost/test-build-nixpacks:latest

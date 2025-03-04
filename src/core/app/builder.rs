@@ -1,4 +1,4 @@
-use super::{image::Image, source::Source};
+use super::image::Image;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

@@ -14,7 +14,9 @@
     devShells = supportedSystems (system: {
       default = with nixpkgs.legacyPackages.${system}; mkShell {
         packages = [
+          bacon
           cargo
+          cargo-nextest
           clippy
           nixpacks
           openssl

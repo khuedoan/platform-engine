@@ -1,4 +1,4 @@
-use crate::core::app::{builder::Builder, image::Image};
+use crate::core::app::image::Image;
 use serde::{Deserialize, Serialize};
 use temporal_sdk::{ActContext, ActivityError};
 
