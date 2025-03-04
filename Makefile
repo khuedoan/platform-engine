@@ -1,11 +1,18 @@
-.PHONY: default dev fmt lint test clean
+.PHONY: default build dev fix fmt lint test clean
+
+default: build
+
+build:
+	cargo build --release
 
 dev:
 	docker compose up --detach
 	bacon run
 
-fmt:
+fix:
 	cargo clippy --fix --allow-staged
+
+fmt:
 	cargo fmt
 
 lint:

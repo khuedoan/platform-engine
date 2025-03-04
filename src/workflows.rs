@@ -7,14 +7,18 @@ use tracing::{error, info, warn};
 
 pub mod golden_path;
 
-pub async fn start_workflow(client: &RetryClient<Client>, source: Source) -> Result<()> {
+pub async fn start_workflow(
+    client: &RetryClient<Client>,
+    id: String,
+    source: Source,
+) -> Result<()> {
     let input = vec![source.as_json_payload()?];
 
     match client
         .start_workflow(
             input,
             "main".to_string(),
-            "zGtLfDcgmBqBUya1qTpzRzpBpoHx-86b1a059da167ae0a4da82e3168c789e73884f5e".to_string(),
+            id,
             golden_path::name(),
             None,
             WorkflowOptions {
@@ -53,6 +57,57 @@ mod tests {
 
         start_workflow(
             &client,
+            "test".to_string(),
+            Source::Git {
+                name: "example-service".to_string(),
+                url: "https://github.com/khuedoan/example-service".to_string(),
+                revision: "828c31f942e8913ab2af53a2841c180586c5b7e1".to_string(),
+                path: PathBuf::from(
+                    "/tmp/example-service/828c31f942e8913ab2af53a2841c180586c5b7e1",
+                ),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_start_multiple_workflows() {
+        let client = temporal::get_client().await.unwrap();
+
+        start_workflow(
+            &client,
+            "test1".to_string(),
+            Source::Git {
+                name: "example-service".to_string(),
+                url: "https://github.com/khuedoan/example-service".to_string(),
+                revision: "828c31f942e8913ab2af53a2841c180586c5b7e1".to_string(),
+                path: PathBuf::from(
+                    "/tmp/example-service/828c31f942e8913ab2af53a2841c180586c5b7e1",
+                ),
+            },
+        )
+        .await
+        .unwrap();
+
+        start_workflow(
+            &client,
+            "test1".to_string(),
+            Source::Git {
+                name: "example-service".to_string(),
+                url: "https://github.com/khuedoan/example-service".to_string(),
+                revision: "828c31f942e8913ab2af53a2841c180586c5b7e1".to_string(),
+                path: PathBuf::from(
+                    "/tmp/example-service/828c31f942e8913ab2af53a2841c180586c5b7e1",
+                ),
+            },
+        )
+        .await
+        .unwrap();
+
+        start_workflow(
+            &client,
+            "test2".to_string(),
             Source::Git {
                 name: "example-service".to_string(),
                 url: "https://github.com/khuedoan/example-service".to_string(),
