@@ -6,6 +6,7 @@ dev:
 
 fmt:
 	cargo fmt
+	cargo clippy --fix --allow-staged
 
 lint:
 	cargo clippy -- --deny warnings
