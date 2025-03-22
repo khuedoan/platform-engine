@@ -1,2 +1,4 @@
 /target
-/testdata
+/testdata/example-service
+/testdata/horus
+/testdata/micropaas
