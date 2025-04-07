@@ -6,7 +6,7 @@ RUN apt-get update \
     && apt-get install -y protobuf-compiler
 
 # Dummy source to cache dependencies
-COPY Cargo.toml Cargo.lock .
+COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs \
     && RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target "$(uname -m)-unknown-linux-gnu" \
     && rm -rf src
