@@ -4,7 +4,7 @@ use crate::activities::*;
 use crate::core::app::{builder::Builder, image::Image, source::Source};
 use anyhow::anyhow;
 use temporal_sdk::{ActivityOptions, WfContext, WfExitValue, WorkflowResult};
-use temporal_sdk_core_protos::coresdk::AsJsonPayloadExt;
+use temporal_sdk_core_protos::{coresdk::AsJsonPayloadExt, temporal::api::common::v1::RetryPolicy};
 use tracing::info;
 
 pub fn name() -> String {
@@ -24,7 +24,7 @@ pub async fn definition(ctx: WfContext) -> WorkflowResult<Image> {
         &ctx.activity(ActivityOptions {
             activity_type: "app_source_pull".to_string(),
             input: AppSourcePullInput { source }.as_json_payload()?,
-            start_to_close_timeout: Some(Duration::from_secs(120)),
+            start_to_close_timeout: Some(Duration::from_secs(30)),
             ..Default::default()
         })
         .await
@@ -40,7 +40,7 @@ pub async fn definition(ctx: WfContext) -> WorkflowResult<Image> {
                 source: pulled_source,
             }
             .as_json_payload()?,
-            start_to_close_timeout: Some(Duration::from_secs(120)),
+            start_to_close_timeout: Some(Duration::from_secs(5)),
             ..Default::default()
         })
         .await
@@ -54,6 +54,10 @@ pub async fn definition(ctx: WfContext) -> WorkflowResult<Image> {
             activity_type: "app_build".to_string(),
             input: AppBuildInput { builder }.as_json_payload()?,
             start_to_close_timeout: Some(Duration::from_secs(600)),
+            retry_policy: Some(RetryPolicy {
+                maximum_attempts: 1,
+                ..Default::default()
+            }),
             ..Default::default()
         })
         .await
@@ -66,7 +70,7 @@ pub async fn definition(ctx: WfContext) -> WorkflowResult<Image> {
         &ctx.activity(ActivityOptions {
             activity_type: "image_push".to_string(),
             input: ImagePushInput { image }.as_json_payload()?,
-            start_to_close_timeout: Some(Duration::from_secs(600)),
+            start_to_close_timeout: Some(Duration::from_secs(120)),
             ..Default::default()
         })
         .await
