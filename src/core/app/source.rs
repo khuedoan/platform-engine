@@ -46,7 +46,7 @@ impl Source {
 
     pub async fn detect_builder(&self) -> Result<Builder> {
         // TODO obviously
-        let registry = "localhost:5000";
+        let registry = std::env::var("REGISTRY").unwrap_or("http://localhost:5000".to_string());
 
         match self {
             Source::Git {
