@@ -101,14 +101,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_gitops() {
-        GitOps::new("https://github.com/khuedoan/horus".to_string())
+        GitOps::new("https://github.com/khuedoan/cloudlab".to_string())
             .await
             .unwrap();
     }
 
     #[tokio::test]
     async fn test_read_app() {
-        let gitops = GitOps::new("https://github.com/khuedoan/horus".to_string())
+        let gitops = GitOps::new("https://github.com/khuedoan/cloudlab".to_string())
             .await
             .unwrap();
 
