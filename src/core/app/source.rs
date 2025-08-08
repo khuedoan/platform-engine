@@ -1,6 +1,5 @@
 use super::{builder::Builder, image::Image};
 use anyhow::Result;
-use git2::{FetchOptions, Oid, Repository};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::{fs::remove_dir_all, process::Command};
@@ -31,12 +30,67 @@ impl Source {
                     remove_dir_all(&path).await?;
                 }
 
-                let repo = Repository::init(path)?;
-                let mut remote = repo.remote("origin", url)?;
-                remote.fetch(&[revision], Some(FetchOptions::new().depth(1)), None)?;
-                let object = repo.find_object(Oid::from_str(revision)?, None)?;
-                repo.checkout_tree(&object, None)?;
-                repo.set_head_detached(object.id())?;
+                // Initialize empty git repository
+                let output = Command::new("git")
+                    .args(["init", "path"])
+                    .output()
+                    .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(anyhow::anyhow!("Failed to init repository: {}", stderr));
+                }
+
+                // Create the directory if it doesn't exist
+                tokio::fs::create_dir_all(&path).await?;
+
+                // Initialize git in the target directory
+                let output = Command::new("git")
+                    .args(["init"])
+                    .current_dir(&path)
+                    .output()
+                    .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(anyhow::anyhow!("Failed to init repository: {}", stderr));
+                }
+
+                // Add remote origin
+                let output = Command::new("git")
+                    .args(["remote", "add", "origin", url])
+                    .current_dir(&path)
+                    .output()
+                    .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(anyhow::anyhow!("Failed to add remote: {}", stderr));
+                }
+
+                // Fetch with depth 1
+                let output = Command::new("git")
+                    .args(["fetch", "--depth", "1", "origin", revision])
+                    .current_dir(&path)
+                    .output()
+                    .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(anyhow::anyhow!("Failed to fetch: {}", stderr));
+                }
+
+                // Checkout the specific revision
+                let output = Command::new("git")
+                    .args(["checkout", revision])
+                    .current_dir(&path)
+                    .output()
+                    .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(anyhow::anyhow!("Failed to checkout: {}", stderr));
+                }
 
                 Ok(self.clone())
             }

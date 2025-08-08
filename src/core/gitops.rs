@@ -1,21 +1,15 @@
 use anyhow::{anyhow, Result};
-use git2::Repository;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs::File, path::PathBuf};
+use tokio::process::Command;
 use tracing::{debug, info};
 
 pub struct GitOps {
-    repo: Repository,
+    repo_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Namespace {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct Values {
-    app_template: App,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct App {
@@ -49,15 +43,32 @@ impl GitOps {
     pub async fn new(url: String) -> Result<Self> {
         let path = PathBuf::from("/tmp/gitops");
 
-        let repo = if path.exists() {
+        if path.exists() {
             info!("opening existing repository at {path:?}");
-            Repository::open(path)?
+            // Verify it's a git repository
+            let output = Command::new("git")
+                .args(["rev-parse", "--git-dir"])
+                .current_dir(&path)
+                .output()
+                .await?;
+
+            if !output.status.success() {
+                return Err(anyhow!("Directory exists but is not a git repository"));
+            }
         } else {
             info!("cloning {url} repository to {path:?}");
-            Repository::clone(&url, &path)?
-        };
+            let output = Command::new("git")
+                .args(["clone", &url, path.to_str().unwrap()])
+                .output()
+                .await?;
 
-        Ok(Self { repo })
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(anyhow!("Failed to clone repository: {}", stderr));
+            }
+        }
+
+        Ok(Self { repo_path: path })
     }
 
     pub async fn create_namespace(&self, _name: String) -> Result<Namespace> {
@@ -74,16 +85,15 @@ impl GitOps {
 
     pub async fn read_app(&self, _namespace: String, _name: String) -> Result<App> {
         let path = self
-            .repo
-            .workdir()
-            .ok_or(anyhow!("missing workdir"))?
+            .repo_path
             .join("apps")
+            .join("khuedoan")
             .join("blog")
-            .join("values.yaml");
+            .join("production.yaml");
         debug!("reading value file at {path:?}");
-        let values: Values = serde_yaml::from_reader(File::open(path)?)?;
+        let app: App = serde_yaml::from_reader(File::open(path)?)?;
 
-        Ok(values.app_template)
+        Ok(app)
     }
 
     pub async fn update_app(&self) -> Result<App> {
