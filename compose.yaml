@@ -35,6 +35,6 @@ services:
     restart: on-failure
     environment:
       TEMPORAL_URL: http://temporal:7233
-      REGISTRY: registry:5000
+      REGISTRY: localhost:5000
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
