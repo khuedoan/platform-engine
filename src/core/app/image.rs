@@ -1,9 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bollard::{Docker, image::PushImageOptions};
 use core::fmt;
-use futures::stream::StreamExt;
+use futures::stream::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Image {
@@ -24,7 +23,9 @@ impl Image {
     }
 
     pub async fn push(&self) -> Result<Self> {
-        let docker = Docker::connect_with_socket_defaults()?;
+        let docker =
+            Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
+
         docker
             .push_image(
                 &format!("{}/{}", self.registry, self.repository),
@@ -33,12 +34,9 @@ impl Image {
                 }),
                 None,
             )
-            .for_each(|result| async {
-                if let Err(e) = result {
-                    error!("push error: {e:?}");
-                }
-            })
-            .await;
+            .try_for_each(|_chunk| async { Ok(()) })
+            .await
+            .context(format!("failed to push image {}", self))?;
 
         Ok(self.clone())
     }
