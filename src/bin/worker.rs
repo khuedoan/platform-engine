@@ -1,6 +1,6 @@
 use anyhow::Result;
-use app_engine::{activities::*, temporal, workflows};
 use gethostname::gethostname;
+use platform_engine::{activities::*, temporal, workflows};
 use std::sync::Arc;
 use temporal_sdk::Worker;
 use temporal_sdk_core::{CoreRuntime, WorkerConfigBuilder, init_worker};
