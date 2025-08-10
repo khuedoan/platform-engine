@@ -17,6 +17,7 @@ fmt:
 
 lint:
 	cargo clippy -- --deny warnings
+	cargo fmt --check
 
 testdata:
 	git clone https://github.com/khuedoan/cloudlab testdata/cloudlab
