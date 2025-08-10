@@ -3,11 +3,11 @@ use std::process::Command;
 mod common;
 
 fn push_to_forgejo() {
-    let test_repo_path = "testdata/example-service";
+    let test_repo_path = "testdata/blog";
 
     // HTTP remote with credentials embedded
     let remote_url = format!(
-        "http://{}:{}@localhost:3000/{}/example-service.git",
+        "http://{}:{}@localhost:3000/{}/blog.git",
         common::FORGEJO_ADMIN_USER,
         common::FORGEJO_ADMIN_PASS,
         common::FORGEJO_ADMIN_USER

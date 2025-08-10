@@ -64,6 +64,7 @@ mod tests {
             PathBuf::from("testdata/micropaas"),
             Image {
                 registry: "localhost:5000".to_string(),
+                owner: "test".to_string(),
                 repository: "test-build-dockerfile".to_string(),
                 tag: "latest".to_string(),
             },
@@ -77,6 +78,7 @@ mod tests {
             PathBuf::from("testdata/example-service"),
             Image {
                 registry: "localhost:5000".to_string(),
+                owner: "test".to_string(),
                 repository: "test-build-nixpacks".to_string(),
                 tag: "latest".to_string(),
             },

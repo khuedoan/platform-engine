@@ -9,6 +9,7 @@ use tracing::warn;
 pub enum Source {
     Git {
         name: String,
+        owner: String,
         url: String,
         revision: String,
         path: PathBuf,
@@ -47,7 +48,7 @@ impl Source {
                 // Initialize git in the target directory
                 let output = Command::new("git")
                     .args(["init"])
-                    .current_dir(&path)
+                    .current_dir(path)
                     .output()
                     .await?;
 
@@ -59,7 +60,7 @@ impl Source {
                 // Add remote origin
                 let output = Command::new("git")
                     .args(["remote", "add", "origin", url])
-                    .current_dir(&path)
+                    .current_dir(path)
                     .output()
                     .await?;
 
@@ -71,7 +72,7 @@ impl Source {
                 // Fetch with depth 1
                 let output = Command::new("git")
                     .args(["fetch", "--depth", "1", "origin", revision])
-                    .current_dir(&path)
+                    .current_dir(path)
                     .output()
                     .await?;
 
@@ -83,7 +84,7 @@ impl Source {
                 // Checkout the specific revision
                 let output = Command::new("git")
                     .args(["checkout", revision])
-                    .current_dir(&path)
+                    .current_dir(path)
                     .output()
                     .await?;
 
@@ -105,6 +106,7 @@ impl Source {
         match self {
             Source::Git {
                 name,
+                owner,
                 revision,
                 path,
                 ..
@@ -114,6 +116,7 @@ impl Source {
                         path.to_path_buf(),
                         Image {
                             registry: registry.to_string(),
+                            owner: owner.to_string(),
                             repository: name.to_string(),
                             tag: revision.to_string(),
                         },
@@ -132,6 +135,7 @@ impl Source {
                         path.to_path_buf(),
                         Image {
                             registry: registry.to_string(),
+                            owner: owner.to_string(),
                             repository: name.to_string(),
                             tag: revision.to_string(),
                         },
@@ -144,6 +148,7 @@ impl Source {
                 image.clone(),
                 Image {
                     registry: registry.to_string(),
+                    owner: image.owner.clone(),
                     repository: image.repository.clone(),
                     tag: image.tag.clone(),
                 },
@@ -163,6 +168,7 @@ mod tests {
         );
         let source = Source::Git {
             name: "".to_string(),
+            owner: "khuedoan".to_string(),
             url: "https://github.com/khuedoan/example-service".to_string(),
             revision: "828c31f942e8913ab2af53a2841c180586c5b7e1".to_string(),
             path: path.clone(),
@@ -176,6 +182,7 @@ mod tests {
     async fn test_detect_builder_nixpacks() {
         let source = Source::Git {
             name: "".to_string(),
+            owner: "test".to_string(),
             url: "".to_string(),
             revision: "".to_string(),
             path: PathBuf::from("testdata/example-service"),
@@ -189,6 +196,7 @@ mod tests {
     async fn test_detect_builder_dockerfile() {
         let source = Source::Git {
             name: "".to_string(),
+            owner: "test".to_string(),
             url: "".to_string(),
             revision: "".to_string(),
             path: PathBuf::from("testdata/micropaas"),

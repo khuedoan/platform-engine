@@ -1,25 +1,25 @@
-use crate::core::app::source::Source;
+use crate::workflows::push_to_deploy::PushToDeployInput;
 use anyhow::{Result, anyhow};
 use temporal_client::{Client, RetryClient, WorkflowOptions, tonic::Code};
 use temporal_sdk_core::WorkflowClientTrait;
 use temporal_sdk_core_protos::coresdk::AsJsonPayloadExt;
 use tracing::{error, info, warn};
 
-pub mod golden_path;
+pub mod push_to_deploy;
 
 pub async fn start_workflow(
     client: &RetryClient<Client>,
     id: String,
-    source: Source,
+    input: PushToDeployInput,
 ) -> Result<()> {
-    let input = vec![source.as_json_payload()?];
+    let input_payload = vec![input.as_json_payload()?];
 
     match client
         .start_workflow(
-            input,
+            input_payload,
             "main".to_string(),
             id,
-            golden_path::name(),
+            push_to_deploy::name(),
             None,
             WorkflowOptions {
                 ..Default::default()
@@ -41,83 +41,5 @@ pub async fn start_workflow(
                 Err(anyhow!("{}", e.code()))
             }
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-    use crate::temporal;
-
-    #[tokio::test]
-    async fn test_start_workflow() {
-        let client = temporal::get_client().await.unwrap();
-
-        start_workflow(
-            &client,
-            "test".to_string(),
-            Source::Git {
-                name: "example-service".to_string(),
-                url: "https://github.com/khuedoan/example-service".to_string(),
-                revision: "828c31f942e8913ab2af53a2841c180586c5b7e1".to_string(),
-                path: PathBuf::from(
-                    "/tmp/example-service/828c31f942e8913ab2af53a2841c180586c5b7e1",
-                ),
-            },
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_start_multiple_workflows() {
-        let client = temporal::get_client().await.unwrap();
-
-        start_workflow(
-            &client,
-            "test1".to_string(),
-            Source::Git {
-                name: "example-service".to_string(),
-                url: "https://github.com/khuedoan/example-service".to_string(),
-                revision: "828c31f942e8913ab2af53a2841c180586c5b7e1".to_string(),
-                path: PathBuf::from(
-                    "/tmp/example-service/828c31f942e8913ab2af53a2841c180586c5b7e1",
-                ),
-            },
-        )
-        .await
-        .unwrap();
-
-        start_workflow(
-            &client,
-            "test1".to_string(),
-            Source::Git {
-                name: "example-service".to_string(),
-                url: "https://github.com/khuedoan/example-service".to_string(),
-                revision: "828c31f942e8913ab2af53a2841c180586c5b7e1".to_string(),
-                path: PathBuf::from(
-                    "/tmp/example-service/828c31f942e8913ab2af53a2841c180586c5b7e1",
-                ),
-            },
-        )
-        .await
-        .unwrap();
-
-        start_workflow(
-            &client,
-            "test2".to_string(),
-            Source::Git {
-                name: "example-service".to_string(),
-                url: "https://github.com/khuedoan/example-service".to_string(),
-                revision: "828c31f942e8913ab2af53a2841c180586c5b7e1".to_string(),
-                path: PathBuf::from(
-                    "/tmp/example-service/828c31f942e8913ab2af53a2841c180586c5b7e1",
-                ),
-            },
-        )
-        .await
-        .unwrap();
     }
 }

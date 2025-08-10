@@ -34,9 +34,16 @@ async fn main() -> Result<()> {
     worker.register_activity("app_source_detect", app_source_detect);
     worker.register_activity("app_build", app_build);
     worker.register_activity("image_push", image_push);
+    worker.register_activity("clone", clone);
+    worker.register_activity("update_app_version", update_app_version);
+    worker.register_activity("git_add", git_add);
+    worker.register_activity("git_commit", git_commit);
+    worker.register_activity("git_push", git_push);
+    worker.register_activity("push_rendered_app", push_rendered_app);
+
     worker.register_wf(
-        workflows::golden_path::name(),
-        workflows::golden_path::definition,
+        workflows::push_to_deploy::name(),
+        workflows::push_to_deploy::definition,
     );
 
     worker.run().await?;
