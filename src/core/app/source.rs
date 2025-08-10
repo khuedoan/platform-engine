@@ -32,7 +32,7 @@ impl Source {
 
                 // Initialize empty git repository
                 let output = Command::new("git")
-                    .args(["init", "path"])
+                    .args(["init", &path.display().to_string()])
                     .output()
                     .await?;
 
@@ -100,7 +100,7 @@ impl Source {
 
     pub async fn detect_builder(&self) -> Result<Builder> {
         // TODO obviously
-        let registry = std::env::var("REGISTRY").unwrap_or("http://localhost:5000".to_string());
+        let registry = std::env::var("REGISTRY").unwrap_or("localhost:5000".to_string());
 
         match self {
             Source::Git {

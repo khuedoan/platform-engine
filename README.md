@@ -19,5 +19,5 @@ make test
     - `activities/`: wrapper for core logic
     - `workflows/`: workflows that will be triggered by the client
     - `bin/`
-        - `client.rs`: control plane program to trigger workflows
+        - `server.rs`: control plane API to trigger workflows
         - `worker.rs`: data plane program to execute logic

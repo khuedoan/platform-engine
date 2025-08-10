@@ -4,6 +4,7 @@ services:
     environment:
       USER_UID: 1000
       USER_GID: 1000
+      FORGEJO__webhook__ALLOWED_HOST_LIST: private
     ports:
       - 3000:3000
   temporal:
@@ -20,3 +21,20 @@ services:
     image: ghcr.io/project-zot/zot:v2.1.2
     ports:
       - 5000:5000
+  server:
+    build: .
+    command:
+      - /usr/local/bin/server
+    restart: on-failure
+    environment:
+      TEMPORAL_URL: http://temporal:7233
+    ports:
+      - 8080:8080
+  worker:
+    build: .
+    restart: on-failure
+    environment:
+      TEMPORAL_URL: http://temporal:7233
+      REGISTRY: registry:5000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

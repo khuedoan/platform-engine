@@ -12,12 +12,18 @@ temporal-sdk-core-api = { git = "https://github.com/temporalio/sdk-core", rev = 
 temporal-sdk-core-protos = { git = "https://github.com/temporalio/sdk-core", rev = "45687c309cfaec0d6e5d6542fdb6942eaae03180", version = "0.1.0" }
 
 anyhow = "1"
+axum = { version = "0.8", features = ["macros", "json"] }
 bollard = "0.18"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# TODO switch to std::net::hostname https://github.com/rust-lang/rust/pull/135141
 gethostname = "1.0.2"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }

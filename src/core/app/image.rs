@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bollard::{image::PushImageOptions, Docker};
+use bollard::{Docker, image::PushImageOptions};
 use core::fmt;
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};

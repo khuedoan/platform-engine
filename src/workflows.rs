@@ -1,6 +1,6 @@
 use crate::core::app::source::Source;
-use anyhow::{anyhow, Result};
-use temporal_client::{tonic::Code, Client, RetryClient, WorkflowOptions};
+use anyhow::{Result, anyhow};
+use temporal_client::{Client, RetryClient, WorkflowOptions, tonic::Code};
 use temporal_sdk_core::WorkflowClientTrait;
 use temporal_sdk_core_protos::coresdk::AsJsonPayloadExt;
 use tracing::{error, info, warn};
