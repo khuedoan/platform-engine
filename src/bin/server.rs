@@ -21,8 +21,14 @@ struct AppState {
 }
 
 #[derive(Deserialize)]
+struct Owner {
+    username: String,
+}
+
+#[derive(Deserialize)]
 struct RepoInfo {
     name: String,
+    owner: Owner,
     #[serde(default)]
     clone_url: String,
 }
@@ -78,6 +84,7 @@ async fn handle_gitea_webhook(
             };
 
             // Map payload to Source::Git
+            let owner = payload.repository.owner.username;
             let repo_name = payload.repository.name;
             let revision = payload.after;
             let url = payload.repository.clone_url;
@@ -94,22 +101,47 @@ async fn handle_gitea_webhook(
             // }
             let source = Source::Git {
                 name: repo_name.clone(),
+                owner: owner.clone(),
                 url,
                 revision: revision.clone(),
                 path: std::path::PathBuf::from(workspace_path),
             };
 
             let workflow_id = format!(
-                "golden-{}-{}",
+                "push-to-deploy-{}-{}",
                 sanitize(&repo_name),
                 &revision[..std::cmp::min(12, revision.len())]
             );
 
+            // Create gitops URL with .git extension if not present
+            let gitops_base_url = std::env::var("GITOPS_URL").unwrap();
+            let gitops_url = if gitops_base_url.ends_with(".git") {
+                gitops_base_url
+            } else {
+                format!("{gitops_base_url}.git")
+            };
+
+            let push_to_deploy_input =
+                platform_engine::workflows::push_to_deploy::PushToDeployInput {
+                    source,
+                    gitops_url,
+                    gitops_revision: std::env::var("GITOPS_REVISION")
+                        .unwrap_or_else(|_| "master".to_string()),
+                    namespace: owner,
+                    app: repo_name.clone(),
+                    // TODO detect this based on branching strategy
+                    cluster: std::env::var("APP_CLUSTER")
+                        .unwrap_or_else(|_| "production".to_string()),
+                    registry: std::env::var("REGISTRY")
+                        .unwrap_or_else(|_| "localhost:5000".to_string()),
+                };
+
             // Start workflow
-            let start_res = workflows::start_workflow(&state.client, workflow_id, source).await;
+            let start_res =
+                workflows::start_workflow(&state.client, workflow_id, push_to_deploy_input).await;
             match start_res {
                 Ok(_) => {
-                    info!(repo = %repo_name, rev = %revision, "golden_path triggered");
+                    info!(repo = %repo_name, rev = %revision, "push_to_deploy triggered");
                     StatusCode::ACCEPTED
                 }
                 Err(e) => {

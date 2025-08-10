@@ -28,6 +28,8 @@ services:
     restart: on-failure
     environment:
       TEMPORAL_URL: http://temporal:7233
+      GITOPS_URL: http://git:3000/khuedoan/cloudlab
+      GITOPS_REVISION: master
     ports:
       - 8080:8080
   worker:
@@ -36,5 +38,9 @@ services:
     environment:
       TEMPORAL_URL: http://temporal:7233
       REGISTRY: localhost:5000
+      GIT_USER: Admin
+      GIT_EMAIL: admin@example.com
+      GIT_USERNAME: forgejo_admin
+      GIT_PASSWORD: testing123
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

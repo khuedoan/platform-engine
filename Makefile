@@ -22,6 +22,7 @@ lint:
 testdata:
 	git clone https://github.com/khuedoan/cloudlab testdata/cloudlab
 	git clone https://github.com/khuedoan/example-service testdata/example-service
+	git clone https://github.com/khuedoan/blog testdata/blog
 	git clone https://github.com/khuedoan/micropaas testdata/micropaas
 
 test: testdata

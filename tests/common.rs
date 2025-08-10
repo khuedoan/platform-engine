@@ -3,7 +3,7 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::json;
 
 pub const FORGEJO_BASE_URL: &str = "http://localhost:3000";
-pub const FORGEJO_ADMIN_USER: &str = "forgejo_admin";
+pub const FORGEJO_ADMIN_USER: &str = "khuedoan";
 pub const FORGEJO_ADMIN_PASS: &str = "testing123";
 
 fn init_forgejo() {
@@ -55,10 +55,7 @@ fn migrate_repo(clone_addr: &str, repo_owner: &str, repo_name: &str) {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-    let check_url = format!(
-        "{}/api/v1/repos/{}/{}",
-        forgejo_base_url, repo_owner, repo_name
-    );
+    let check_url = format!("{forgejo_base_url}/api/v1/repos/{repo_owner}/{repo_name}");
     let check_resp = client
         .get(&check_url)
         .basic_auth(FORGEJO_ADMIN_USER, Some(FORGEJO_ADMIN_PASS))
@@ -67,10 +64,7 @@ fn migrate_repo(clone_addr: &str, repo_owner: &str, repo_name: &str) {
         .expect("Failed to check if repo exists");
 
     if check_resp.status().is_success() {
-        println!(
-            "Repository '{}/{}' already exists. Skipping migration.",
-            repo_owner, repo_name
-        );
+        println!("Repository '{repo_owner}/{repo_name}' already exists. Skipping migration.");
         return;
     } else if check_resp.status().as_u16() != 404 {
         panic!(
@@ -82,7 +76,7 @@ fn migrate_repo(clone_addr: &str, repo_owner: &str, repo_name: &str) {
         );
     }
 
-    let api_url = format!("{}/api/v1/repos/migrate", forgejo_base_url);
+    let api_url = format!("{forgejo_base_url}/api/v1/repos/migrate");
 
     let body = json!({
         "clone_addr": clone_addr,
@@ -99,26 +93,20 @@ fn migrate_repo(clone_addr: &str, repo_owner: &str, repo_name: &str) {
         .expect("Failed to send migration request");
 
     if response.status().is_success() {
-        println!(
-            "Repository '{}' successfully migrated to owner '{}'",
-            repo_name, repo_owner
-        );
+        println!("Repository '{repo_name}' successfully migrated to owner '{repo_owner}'");
     } else {
         let status = response.status();
         let text = response
             .text()
             .unwrap_or_else(|_| "No response body".to_string());
-        panic!("Failed to migrate repository: HTTP {} - {}", status, text);
+        panic!("Failed to migrate repository: HTTP {status} - {text}");
     }
 }
 
 fn create_repo(repo_owner: &str, repo_name: &str) {
     let client = Client::new();
 
-    let check_url = format!(
-        "{}/api/v1/repos/{}/{}",
-        FORGEJO_BASE_URL, repo_owner, repo_name
-    );
+    let check_url = format!("{FORGEJO_BASE_URL}/api/v1/repos/{repo_owner}/{repo_name}");
 
     let check_resp = client
         .get(&check_url)
@@ -127,10 +115,7 @@ fn create_repo(repo_owner: &str, repo_name: &str) {
         .expect("Failed to check if repo exists");
 
     if check_resp.status().is_success() {
-        println!(
-            "Repository '{}/{}' already exists. Skipping creation.",
-            repo_owner, repo_name
-        );
+        println!("Repository '{repo_owner}/{repo_name}' already exists. Skipping creation.");
         return;
     } else if check_resp.status().as_u16() != 404 {
         panic!(
@@ -143,10 +128,7 @@ fn create_repo(repo_owner: &str, repo_name: &str) {
     }
 
     // Repository doesn't exist — create it
-    let api_url = format!(
-        "{}/api/v1/admin/users/{}/repos",
-        FORGEJO_BASE_URL, repo_owner
-    );
+    let api_url = format!("{FORGEJO_BASE_URL}/api/v1/admin/users/{repo_owner}/repos");
 
     let body = json!({
         "name": repo_name,
@@ -166,25 +148,19 @@ fn create_repo(repo_owner: &str, repo_name: &str) {
         .expect("Failed to send repo creation request");
 
     if resp.status().is_success() {
-        println!(
-            "Repository '{}/{}' successfully created.",
-            repo_owner, repo_name
-        );
+        println!("Repository '{repo_owner}/{repo_name}' successfully created.");
     } else {
         let status = resp.status();
         let text = resp
             .text()
             .unwrap_or_else(|_| "No response body".to_string());
-        panic!("Failed to create repository: HTTP {} - {}", status, text);
+        panic!("Failed to create repository: HTTP {status} - {text}");
     }
 }
 
 fn setup_webhook(repo_owner: &str, repo_name: &str) {
     let client = Client::new();
-    let hooks_url = format!(
-        "{}/api/v1/repos/{}/{}/hooks",
-        FORGEJO_BASE_URL, repo_owner, repo_name
-    );
+    let hooks_url = format!("{FORGEJO_BASE_URL}/api/v1/repos/{repo_owner}/{repo_name}/hooks");
 
     let target_url = "http://server:8080/webhooks/gitea";
 
@@ -213,10 +189,7 @@ fn setup_webhook(repo_owner: &str, repo_name: &str) {
     });
 
     if already_exists {
-        println!(
-            "Webhook already exists for '{}/{}'. Skipping creation.",
-            repo_owner, repo_name
-        );
+        println!("Webhook already exists for '{repo_owner}/{repo_name}'. Skipping creation.");
         return;
     }
 
@@ -243,16 +216,13 @@ fn setup_webhook(repo_owner: &str, repo_name: &str) {
         .expect("Failed to create webhook");
 
     if create_resp.status().is_success() {
-        println!(
-            "Webhook created successfully for '{}/{}'",
-            repo_owner, repo_name
-        );
+        println!("Webhook created successfully for '{repo_owner}/{repo_name}'");
     } else {
         let status = create_resp.status();
         let text = create_resp
             .text()
             .unwrap_or_else(|_| "No response body".to_string());
-        panic!("Failed to create webhook: HTTP {} - {}", status, text);
+        panic!("Failed to create webhook: HTTP {status} - {text}");
     }
 }
 
@@ -263,10 +233,10 @@ pub fn setup() {
     migrate_repo(
         "https://github.com/khuedoan/cloudlab",
         FORGEJO_ADMIN_USER,
-        "gitops",
+        "cloudlab",
     );
 
-    create_repo(FORGEJO_ADMIN_USER, "example-service");
+    create_repo(FORGEJO_ADMIN_USER, "blog");
 
-    setup_webhook(FORGEJO_ADMIN_USER, "example-service");
+    setup_webhook(FORGEJO_ADMIN_USER, "blog");
 }

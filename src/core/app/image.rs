@@ -7,13 +7,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Image {
     pub registry: String,
+    pub owner: String,
     pub repository: String,
     pub tag: String,
 }
 
 impl fmt::Display for Image {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}/{}:{}", self.registry, self.repository, self.tag)
+        write!(
+            f,
+            "{}/{}/{}:{}",
+            self.registry, self.owner, self.repository, self.tag
+        )
     }
 }
 
@@ -28,7 +33,7 @@ impl Image {
 
         docker
             .push_image(
-                &format!("{}/{}", self.registry, self.repository),
+                &format!("{}/{}/{}", self.registry, self.owner, self.repository),
                 Some(PushImageOptions {
                     tag: self.tag.to_string(),
                 }),
@@ -36,7 +41,7 @@ impl Image {
             )
             .try_for_each(|_chunk| async { Ok(()) })
             .await
-            .context(format!("failed to push image {}", self))?;
+            .context(format!("failed to push image {self}"))?;
 
         Ok(self.clone())
     }

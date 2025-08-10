@@ -26,6 +26,7 @@
           protobuf
           rustc
           rustfmt
+          temporal-cli
         ];
       };
     });
