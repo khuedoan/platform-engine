@@ -1,9 +1,10 @@
 use anyhow::Result;
 use app_engine::{activities::*, temporal, workflows};
+use gethostname::gethostname;
 use std::sync::Arc;
 use temporal_sdk::Worker;
-use temporal_sdk_core::{init_worker, CoreRuntime, WorkerConfigBuilder};
-use temporal_sdk_core_api::telemetry::TelemetryOptionsBuilder;
+use temporal_sdk_core::{CoreRuntime, WorkerConfigBuilder, init_worker};
+use temporal_sdk_core_api::{telemetry::TelemetryOptionsBuilder, worker::WorkerVersioningStrategy};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -21,7 +22,10 @@ async fn main() -> Result<()> {
     let worker_config = WorkerConfigBuilder::default()
         .namespace("default")
         .task_queue("main")
-        .worker_build_id("v0.1.0")
+        .client_identity_override(Some(gethostname().to_string_lossy().into_owned()))
+        .versioning_strategy(WorkerVersioningStrategy::None {
+            build_id: env!("CARGO_PKG_VERSION").to_string(),
+        })
         .build()?;
     let core_worker = init_worker(&runtime, worker_config, client)?;
     let mut worker = Worker::new_from_core(Arc::new(core_worker), "main");
