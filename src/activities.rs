@@ -71,14 +71,33 @@ pub async fn clone(_ctx: ActContext, input: CloneInput) -> Result<String, Activi
             .map_err(|e| anyhow!(e))?;
     }
 
-    // Create the directory
     tokio::fs::create_dir_all(&workspace_path)
         .await
         .map_err(|e| anyhow!(e))?;
 
-    // Initialize git in the target directory
+    // Create authenticated URL with credentials from environment variables
+    let git_username = std::env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
+    let git_password = std::env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
+
+    // Convert URL to include credentials
+    let auth_url = if input.url.starts_with("http://") || input.url.starts_with("https://") {
+        let url_without_protocol = input
+            .url
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+        format!("http://{git_username}:{git_password}@{url_without_protocol}")
+    } else {
+        input.url.clone()
+    };
+
     let output = Command::new("git")
-        .args(["init"])
+        .args([
+            "clone",
+            "--branch",
+            &input.revision,
+            &auth_url,
+            ".",
+        ])
         .current_dir(&workspace_path)
         .output()
         .await
@@ -86,7 +105,7 @@ pub async fn clone(_ctx: ActContext, input: CloneInput) -> Result<String, Activi
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("Failed to init repository: {}", stderr).into());
+        return Err(anyhow!("Failed to clone repository: {}", stderr).into());
     }
 
     // Set git user and email from environment variables
@@ -116,60 +135,6 @@ pub async fn clone(_ctx: ActContext, input: CloneInput) -> Result<String, Activi
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("Failed to set git email: {}", stderr).into());
-    }
-
-    // Create authenticated URL with credentials from environment variables
-    let git_username = std::env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
-    let git_password = std::env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
-
-    // Convert URL to include credentials
-    let auth_url = if input.url.starts_with("http://") || input.url.starts_with("https://") {
-        let url_without_protocol = input
-            .url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://");
-        format!("http://{git_username}:{git_password}@{url_without_protocol}")
-    } else {
-        input.url.clone()
-    };
-
-    // Add remote origin with authentication
-    let output = Command::new("git")
-        .args(["remote", "add", "origin", &auth_url])
-        .current_dir(&workspace_path)
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("Failed to add remote: {}", stderr).into());
-    }
-
-    // Fetch with depth 1
-    let output = Command::new("git")
-        .args(["fetch", "--depth", "1", "origin", &input.revision])
-        .current_dir(&workspace_path)
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("Failed to fetch: {}", stderr).into());
-    }
-
-    // Checkout the specific revision
-    let output = Command::new("git")
-        .args(["checkout", &input.revision])
-        .current_dir(&workspace_path)
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("Failed to checkout: {}", stderr).into());
     }
 
     Ok(workspace)
@@ -432,8 +397,8 @@ pub async fn push_rendered_app(
             "oci://ghcr.io/bjw-s-labs/helm/app-template:4.1.1",
             "--values",
             &format!(
-                "{}/{}/{}/{}.yaml",
-                input.namespace, input.app, input.cluster, input.cluster
+                "{}/{}/{}.yaml",
+                input.namespace, input.app, input.cluster
             ),
         ])
         .current_dir(&input.apps_dir)

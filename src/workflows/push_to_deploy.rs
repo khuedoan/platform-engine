@@ -125,7 +125,7 @@ pub async fn definition(ctx: WfContext) -> WorkflowResult<Image> {
                 app: input.app.clone(),
                 cluster: input.cluster.clone(),
                 new_images: vec![AppImageUpdate {
-                    repository: image.repository.clone(),
+                    repository: format!("{}/{}/{}", image.registry, image.owner, image.repository),
                     tag: image.tag.clone(),
                 }],
             }
