@@ -1,0 +1,8 @@
+[book]
+authors = ["Khue Doan"]
+language = "en"
+title = "Platform Engine"
+src = "."
+
+[output.html]
+preferred-dark-theme = "ayu"

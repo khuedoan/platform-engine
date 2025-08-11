@@ -20,6 +20,7 @@
           cargo
           cargo-nextest
           clippy
+          mdbook
           nixpacks
           openssl
           pkg-config

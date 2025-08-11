@@ -1,13 +1,4 @@
-# Platform Engine
-
-## Development
-
-```sh
-make dev
-make test
-```
-
-## Project structure
+# Project structure
 
 - `src/`
     - `core/`
