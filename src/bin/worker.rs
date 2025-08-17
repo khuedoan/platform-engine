@@ -39,7 +39,6 @@ async fn main() -> Result<()> {
     worker.register_activity("git_add", git_add);
     worker.register_activity("git_commit", git_commit);
     worker.register_activity("git_push", git_push);
-    worker.register_activity("push_rendered_app", push_rendered_app);
 
     worker.register_wf(
         workflows::push_to_deploy::name(),

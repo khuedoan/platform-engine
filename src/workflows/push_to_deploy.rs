@@ -177,40 +177,14 @@ pub async fn definition(ctx: WfContext) -> WorkflowResult<Image> {
         .await
         .success_payload_or_error()?;
 
-        // Execute GitPush and PushRenderedApp concurrently
-        let git_push_future = ctx.activity(ActivityOptions {
+        ctx.activity(ActivityOptions {
             activity_type: "git_push".to_string(),
             input: GitPushInput { dir: workspace }.as_json_payload()?,
             start_to_close_timeout: Some(Duration::from_secs(60)),
             ..Default::default()
-        });
-
-        let push_rendered_app_future = ctx.activity(ActivityOptions {
-            activity_type: "push_rendered_app".to_string(),
-            input: PushRenderedAppInput {
-                apps_dir: apps_dir.to_string_lossy().to_string(),
-                namespace: input.namespace,
-                app: input.app,
-                cluster: input.cluster,
-                registry: input.registry,
-            }
-            .as_json_payload()?,
-            start_to_close_timeout: Some(Duration::from_secs(120)),
-            ..Default::default()
-        });
-
-        // Wait for GitPush to complete
-        git_push_future.await.success_payload_or_error()?;
-
-        // Wait for PushRenderedApp to complete
-        let _push_result: PushResult = serde_json::from_slice(
-            &push_rendered_app_future
-                .await
-                .success_payload_or_error()?
-                .ok_or(anyhow!("missing payload"))?
-                .data,
-        )?;
-
+        })
+        .await
+        .success_payload_or_error()?;
         info!("App update completed successfully");
     } else {
         info!("No changes detected, skipping app update steps");

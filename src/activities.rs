@@ -91,13 +91,7 @@ pub async fn clone(_ctx: ActContext, input: CloneInput) -> Result<String, Activi
     };
 
     let output = Command::new("git")
-        .args([
-            "clone",
-            "--branch",
-            &input.revision,
-            &auth_url,
-            ".",
-        ])
+        .args(["clone", "--branch", &input.revision, &auth_url, "."])
         .current_dir(&workspace_path)
         .output()
         .await
@@ -353,94 +347,6 @@ pub async fn git_push(_ctx: ActContext, input: GitPushInput) -> Result<(), Activ
         return Err(anyhow!("git push failed").into());
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PushRenderedAppInput {
-    pub apps_dir: String,
-    pub namespace: String,
-    pub app: String,
-    pub cluster: String,
-    pub registry: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PushResult {
-    pub reference: String,
-    pub digest: Option<String>,
-    pub size: Option<u64>,
-}
-
-pub async fn push_rendered_app(
-    _ctx: ActContext,
-    input: PushRenderedAppInput,
-) -> Result<PushResult, ActivityError> {
-    // Create a temporary directory under /tmp
-    let render_dir = format!(
-        "/tmp/{}-{}-render",
-        input.app.replace('/', "-"),
-        input.cluster
-    );
-    let _ = tokio::fs::remove_dir_all(&render_dir).await;
-    tokio::fs::create_dir_all(&render_dir)
-        .await
-        .map_err(|e| anyhow!(e))?;
-
-    // Run helm template
-    // The chart is remote OCI; values path is relative to apps_dir
-    let output = Command::new("helm")
-        .args([
-            "template",
-            "--namespace",
-            &input.namespace,
-            &input.app,
-            "oci://ghcr.io/bjw-s-labs/helm/app-template:4.1.1",
-            "--values",
-            &format!(
-                "{}/{}/{}.yaml",
-                input.namespace, input.app, input.cluster
-            ),
-        ])
-        .current_dir(&input.apps_dir)
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "helm template failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
-    }
-
-    // Write rendered output to file
-    fs::write(Path::new(&render_dir).join("rendered.yaml"), &output.stdout)
-        .map_err(|e| anyhow!(e))?;
-
-    // Push with oras
-    let image_ref = format!(
-        "{}/{}/{}:{}",
-        input.registry, input.namespace, input.app, input.cluster
-    );
-    let oras_output = Command::new("oras")
-        .args(["push", "--format=json", "--plain-http", &image_ref, "."])
-        .current_dir(&render_dir)
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
-
-    if !oras_output.status.success() {
-        return Err(anyhow!(
-            "oras push failed: {}",
-            String::from_utf8_lossy(&oras_output.stderr)
-        )
-        .into());
-    }
-
-    let result: PushResult = serde_json::from_slice(&oras_output.stdout).map_err(|e| anyhow!(e))?;
-
-    Ok(result)
 }
 
 #[cfg(test)]
