@@ -24,7 +24,7 @@ RUN echo "experimental-features = flakes nix-command" >> /etc/nix/nix.conf \
 
 RUN nix-env --install --quiet --attr \
     nixpkgs.docker \
-    nixpkgs.git \
+    nixpkgs.gitMinimal \
     nixpkgs.nixpacks \
     nixpkgs.kubernetes-helm \
     nixpkgs.oras
