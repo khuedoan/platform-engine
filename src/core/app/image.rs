@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
-use bollard::{Docker, image::PushImageOptions};
 use core::fmt;
-use futures::stream::TryStreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Image {
@@ -28,20 +27,20 @@ impl Image {
     }
 
     pub async fn push(&self) -> Result<Self> {
-        let docker =
-            Docker::connect_with_socket_defaults().context("failed to connect to Docker socket")?;
-
-        docker
-            .push_image(
-                &format!("{}/{}/{}", self.registry, self.owner, self.repository),
-                Some(PushImageOptions {
-                    tag: self.tag.to_string(),
-                }),
-                None,
-            )
-            .try_for_each(|_chunk| async { Ok(()) })
+        let image_ref = format!("{self}");
+        let output = Command::new("docker")
+            .args(["push", &image_ref])
+            .output()
             .await
-            .context(format!("failed to push image {self}"))?;
+            .context("failed to run docker push")?;
+
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "failed to push image {image_ref}\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
 
         Ok(self.clone())
     }

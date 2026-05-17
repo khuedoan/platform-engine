@@ -86,7 +86,7 @@ pub async fn definition(ctx: WfContext) -> WorkflowResult<Image> {
         &ctx.activity(ActivityOptions {
             activity_type: "image_push".to_string(),
             input: ImagePushInput { image: built_image }.as_json_payload()?,
-            start_to_close_timeout: Some(Duration::from_secs(120)),
+            start_to_close_timeout: Some(Duration::from_secs(600)),
             ..Default::default()
         })
         .await
