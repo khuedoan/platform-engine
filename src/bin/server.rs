@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
         .route("/healthz", post(|| async { StatusCode::NO_CONTENT }))
         .with_state(state);
 
-    let listener = TcpListener::bind("0.0.0.0:8080").await?;
+    let listener = TcpListener::bind("[::]:8080").await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
