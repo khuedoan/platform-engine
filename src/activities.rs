@@ -1,10 +1,14 @@
 use crate::core::app::{builder::Builder, image::Image, source::Source};
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
+use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value;
+use serde_json::{Value as JsonValue, json};
+use serde_yaml::Value as YamlValue;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use temporal_sdk::{ActContext, ActivityError};
+use tokio::time::{Duration, sleep};
 use tokio::{fs::remove_dir_all, process::Command};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,7 +166,7 @@ pub async fn update_app_version_inner(input: UpdateAppVersionInput) -> anyhow::R
         .join(&input.app)
         .join(format!("{}.yaml", input.cluster));
 
-    let mut doc: Value = serde_yaml::from_reader(fs::File::open(&values_path)?)?;
+    let mut doc: YamlValue = serde_yaml::from_reader(fs::File::open(&values_path)?)?;
 
     let mut changed = false;
     update_image_tags_recursive(&mut doc, &input.new_images, &mut changed);
@@ -177,27 +181,28 @@ pub async fn update_app_version_inner(input: UpdateAppVersionInput) -> anyhow::R
 }
 
 fn update_image_tags_recursive(
-    node: &mut Value,
+    node: &mut YamlValue,
     new_images: &[AppImageUpdate],
     changed: &mut bool,
 ) {
     match node {
-        Value::Mapping(map) => {
+        YamlValue::Mapping(map) => {
             // Detect structure: image: { repository: ..., tag: ... }
-            if let Some(Value::Mapping(image_map)) = map.get_mut(Value::String("image".to_string()))
+            if let Some(YamlValue::Mapping(image_map)) =
+                map.get_mut(YamlValue::String("image".to_string()))
             {
-                let repo_key = Value::String("repository".to_string());
-                let tag_key = Value::String("tag".to_string());
+                let repo_key = YamlValue::String("repository".to_string());
+                let tag_key = YamlValue::String("tag".to_string());
                 let (repo_opt, tag_opt) = (
                     image_map.get(&repo_key).cloned(),
                     image_map.get(&tag_key).cloned(),
                 );
-                if let (Some(Value::String(repo_str)), Some(Value::String(tag_str))) =
+                if let (Some(YamlValue::String(repo_str)), Some(YamlValue::String(tag_str))) =
                     (repo_opt, tag_opt)
                 {
                     for img in new_images {
                         if repo_str == img.repository && tag_str != img.tag {
-                            image_map.insert(tag_key.clone(), Value::String(img.tag.clone()));
+                            image_map.insert(tag_key.clone(), YamlValue::String(img.tag.clone()));
                             *changed = true;
                         }
                     }
@@ -205,14 +210,14 @@ fn update_image_tags_recursive(
             }
 
             // Recurse other keys
-            let keys: Vec<Value> = map.keys().cloned().collect();
+            let keys: Vec<YamlValue> = map.keys().cloned().collect();
             for key in keys {
                 if let Some(val) = map.get_mut(&key) {
                     update_image_tags_recursive(val, new_images, changed);
                 }
             }
         }
-        Value::Sequence(seq) => {
+        YamlValue::Sequence(seq) => {
             for item in seq.iter_mut() {
                 update_image_tags_recursive(item, new_images, changed);
             }
@@ -347,6 +352,389 @@ pub async fn git_push(_ctx: ActContext, input: GitPushInput) -> Result<(), Activ
         return Err(anyhow!("git push failed").into());
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgejoEnsureUserInput {
+    pub forgejo_url: String,
+    pub username: String,
+    pub email: String,
+}
+
+pub async fn forgejo_wait(_ctx: ActContext, forgejo_url: String) -> Result<(), ActivityError> {
+    for _ in 0..60 {
+        match forgejo_request(Method::GET, &forgejo_url, "/api/healthz", None).await {
+            Ok((StatusCode::OK, _)) => return Ok(()),
+            Ok(_) | Err(_) => sleep(Duration::from_secs(5)).await,
+        }
+    }
+
+    Err(anyhow!("timed out waiting for Forgejo").into())
+}
+
+pub async fn forgejo_ensure_user(
+    _ctx: ActContext,
+    input: ForgejoEnsureUserInput,
+) -> Result<(), ActivityError> {
+    let path = format!("/api/v1/users/{}", input.username);
+    let (status, body) = forgejo_request(Method::GET, &input.forgejo_url, &path, None)
+        .await
+        .map_err(|e| anyhow!(e))?;
+
+    match status {
+        StatusCode::OK => {}
+        StatusCode::NOT_FOUND => {
+            let password = env::var("NETAMOS_PASSWORD").context("NETAMOS_PASSWORD is required")?;
+            expect_forgejo_status(
+                Method::POST,
+                &input.forgejo_url,
+                "/api/v1/admin/users",
+                Some(json!({
+                    "email": input.email,
+                    "username": input.username,
+                    "password": password,
+                    "must_change_password": false,
+                    "restricted": false,
+                })),
+                &[StatusCode::CREATED],
+            )
+            .await?;
+        }
+        _ => return Err(forgejo_status_error(Method::GET, &path, status, &body).into()),
+    }
+
+    let password = env::var("NETAMOS_PASSWORD").context("NETAMOS_PASSWORD is required")?;
+    let path = format!("/api/v1/admin/users/{}", input.username);
+    expect_forgejo_status(
+        Method::PATCH,
+        &input.forgejo_url,
+        &path,
+        Some(json!({
+            "password": password,
+            "must_change_password": false,
+            "restricted": false,
+        })),
+        &[StatusCode::OK],
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgejoEnsureRepoInput {
+    pub forgejo_url: String,
+    pub repo: String,
+    pub private: bool,
+}
+
+pub async fn forgejo_ensure_repo(
+    _ctx: ActContext,
+    input: ForgejoEnsureRepoInput,
+) -> Result<(), ActivityError> {
+    ensure_forgejo_repo(&input.forgejo_url, &input.repo, input.private).await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgejoEnsureWebhookInput {
+    pub forgejo_url: String,
+    pub repo: String,
+    pub webhook_url: String,
+    pub legacy_webhook_url: String,
+}
+
+pub async fn forgejo_ensure_webhook(
+    _ctx: ActContext,
+    input: ForgejoEnsureWebhookInput,
+) -> Result<(), ActivityError> {
+    let path = format!("/api/v1/repos/{}/hooks", input.repo);
+    let hooks = expect_forgejo_json(Method::GET, &input.forgejo_url, &path, None).await?;
+    let hooks = hooks
+        .as_array()
+        .ok_or_else(|| anyhow!("Forgejo hooks response is not an array"))?;
+
+    let mut has_webhook = false;
+    for hook in hooks {
+        let url = hook
+            .get("config")
+            .and_then(|config| config.get("url"))
+            .or_else(|| hook.get("url"))
+            .and_then(JsonValue::as_str);
+
+        if url == Some(input.webhook_url.as_str()) {
+            has_webhook = true;
+        }
+
+        if url == Some(input.legacy_webhook_url.as_str()) {
+            let hook_id = hook
+                .get("id")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| anyhow!("Forgejo hook is missing id"))?;
+            let path = format!("/api/v1/repos/{}/hooks/{hook_id}", input.repo);
+            expect_forgejo_status(
+                Method::DELETE,
+                &input.forgejo_url,
+                &path,
+                None,
+                &[StatusCode::NO_CONTENT],
+            )
+            .await?;
+        }
+    }
+
+    if has_webhook {
+        return Ok(());
+    }
+
+    expect_forgejo_status(
+        Method::POST,
+        &input.forgejo_url,
+        &path,
+        Some(json!({
+            "type": "gitea",
+            "config": {
+                "url": input.webhook_url,
+                "content_type": "json",
+            },
+            "events": ["push"],
+            "active": true,
+        })),
+        &[StatusCode::CREATED],
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgejoEnsureCollaboratorInput {
+    pub forgejo_url: String,
+    pub repo: String,
+    pub username: String,
+    pub permission: String,
+}
+
+pub async fn forgejo_ensure_collaborator(
+    _ctx: ActContext,
+    input: ForgejoEnsureCollaboratorInput,
+) -> Result<(), ActivityError> {
+    let path = format!(
+        "/api/v1/repos/{}/collaborators/{}",
+        input.repo, input.username
+    );
+    expect_forgejo_status(
+        Method::PUT,
+        &input.forgejo_url,
+        &path,
+        Some(json!({ "permission": input.permission })),
+        &[StatusCode::NO_CONTENT],
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgejoEnsureGitopsRepoSeededInput {
+    pub forgejo_url: String,
+    pub repo: String,
+    pub source_url: String,
+    pub revision: String,
+}
+
+pub async fn forgejo_ensure_gitops_repo_seeded(
+    _ctx: ActContext,
+    input: ForgejoEnsureGitopsRepoSeededInput,
+) -> Result<(), ActivityError> {
+    ensure_forgejo_repo(&input.forgejo_url, &input.repo, false).await?;
+
+    let target_url = format!(
+        "{}/{}.git",
+        input.forgejo_url.trim_end_matches('/'),
+        input.repo
+    );
+    let output = authenticated_git_command()
+        .args(["ls-remote", &target_url, "HEAD"])
+        .output()
+        .await
+        .map_err(|e| anyhow!(e))?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to inspect GitOps repo: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
+        return Ok(());
+    }
+
+    let workspace = PathBuf::from(format!(
+        "/tmp/gitops-seed-{}",
+        input.repo.replace(['/', ':'], "-")
+    ));
+    if workspace.exists() {
+        remove_dir_all(&workspace).await.map_err(|e| anyhow!(e))?;
+    }
+
+    let output = Command::new("git")
+        .args(["clone", "--branch", &input.revision, &input.source_url])
+        .arg(&workspace)
+        .output()
+        .await
+        .map_err(|e| anyhow!(e))?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to clone GitOps source repo: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    let output = authenticated_git_command()
+        .args([
+            "push",
+            &target_url,
+            &format!("HEAD:refs/heads/{}", input.revision),
+        ])
+        .current_dir(&workspace)
+        .output()
+        .await
+        .map_err(|e| anyhow!(e))?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "failed to seed GitOps repo: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+async fn ensure_forgejo_repo(forgejo_url: &str, repo: &str, private: bool) -> anyhow::Result<()> {
+    let (owner, name) = split_repo(repo)?;
+    let path = format!("/api/v1/repos/{owner}/{name}");
+    let (status, body) = forgejo_request(Method::GET, forgejo_url, &path, None).await?;
+
+    match status {
+        StatusCode::OK => Ok(()),
+        StatusCode::NOT_FOUND => {
+            let path = format!("/api/v1/admin/users/{owner}/repos");
+            expect_forgejo_status(
+                Method::POST,
+                forgejo_url,
+                &path,
+                Some(json!({
+                    "name": name,
+                    "private": private,
+                })),
+                &[StatusCode::CREATED, StatusCode::CONFLICT],
+            )
+            .await?;
+            Ok(())
+        }
+        _ => Err(forgejo_status_error(Method::GET, &path, status, &body)),
+    }
+}
+
+fn split_repo(repo: &str) -> anyhow::Result<(&str, &str)> {
+    repo.split_once('/')
+        .ok_or_else(|| anyhow!("invalid repo {repo}, expected owner/name"))
+}
+
+async fn expect_forgejo_json(
+    method: Method,
+    forgejo_url: &str,
+    path: &str,
+    payload: Option<JsonValue>,
+) -> anyhow::Result<JsonValue> {
+    let body = expect_forgejo_status(method, forgejo_url, path, payload, &[StatusCode::OK]).await?;
+    Ok(serde_json::from_slice(&body)?)
+}
+
+async fn expect_forgejo_status(
+    method: Method,
+    forgejo_url: &str,
+    path: &str,
+    payload: Option<JsonValue>,
+    expected: &[StatusCode],
+) -> anyhow::Result<Vec<u8>> {
+    let (status, body) = forgejo_request(method.clone(), forgejo_url, path, payload).await?;
+    if expected.contains(&status) {
+        Ok(body)
+    } else {
+        Err(forgejo_status_error(method, path, status, &body))
+    }
+}
+
+async fn forgejo_request(
+    method: Method,
+    forgejo_url: &str,
+    path: &str,
+    payload: Option<JsonValue>,
+) -> anyhow::Result<(StatusCode, Vec<u8>)> {
+    let admin_username =
+        env::var("FORGEJO_ADMIN_USERNAME").context("FORGEJO_ADMIN_USERNAME is required")?;
+    let admin_password =
+        env::var("FORGEJO_ADMIN_PASSWORD").context("FORGEJO_ADMIN_PASSWORD is required")?;
+    let client = reqwest::Client::new();
+    let mut request = client
+        .request(
+            method,
+            format!("{}{}", forgejo_url.trim_end_matches('/'), path),
+        )
+        .basic_auth(admin_username, Some(admin_password))
+        .header("Accept", "application/json");
+
+    if let Some(payload) = payload {
+        request = request.json(&payload);
+    }
+
+    let response = request.send().await?;
+    let status = response.status();
+    let body = response.bytes().await?.to_vec();
+    Ok((status, body))
+}
+
+fn forgejo_status_error(
+    method: Method,
+    path: &str,
+    status: StatusCode,
+    body: &[u8],
+) -> anyhow::Error {
+    let body = String::from_utf8_lossy(body);
+    anyhow!(
+        "{} {} returned {}: {}",
+        method.as_str(),
+        path,
+        status.as_u16(),
+        body.chars().take(500).collect::<String>()
+    )
+}
+
+fn authenticated_git_command() -> Command {
+    let mut command = Command::new("git");
+    command
+        .env(
+            "GIT_USERNAME",
+            env::var("FORGEJO_ADMIN_USERNAME").unwrap_or_default(),
+        )
+        .env(
+            "GIT_PASSWORD",
+            env::var("FORGEJO_ADMIN_PASSWORD").unwrap_or_default(),
+        )
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args([
+            "-c",
+            "credential.helper=!f() { echo username=$GIT_USERNAME; echo password=$GIT_PASSWORD; }; f",
+        ]);
+    command
 }
 
 #[cfg(test)]
