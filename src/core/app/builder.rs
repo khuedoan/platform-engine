@@ -1,7 +1,7 @@
 use super::image::Image;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 use tokio::process::Command;
 use tracing::info;
 
@@ -17,8 +17,13 @@ impl Builder {
         match self {
             Builder::Dockerfile(path, image) => {
                 info!("building container image with Dockerfile");
-                let output = Command::new("docker")
-                    .args(["build", ".", "--tag", &format!("{image}")])
+                let image_ref = format!("{image}");
+                let mut command = Command::new("docker");
+                command.args(["build", "."]);
+                configure_docker_build_network(&mut command);
+
+                let output = command
+                    .args(["--tag", &image_ref])
                     .current_dir(path)
                     .output()
                     .await?;
@@ -50,6 +55,25 @@ impl Builder {
                 Ok(image.clone())
             }
             Builder::Vendor(source_image, _image) => source_image.rename().await,
+        }
+    }
+}
+
+fn configure_docker_build_network(command: &mut Command) {
+    if let Ok(network) = env::var("DOCKER_BUILD_NETWORK") {
+        let network = network.trim();
+        if !network.is_empty() {
+            command.args(["--network", network]);
+        }
+    }
+
+    if let Ok(add_hosts) = env::var("DOCKER_BUILD_ADD_HOSTS") {
+        for add_host in add_hosts
+            .split(',')
+            .map(str::trim)
+            .filter(|add_host| !add_host.is_empty())
+        {
+            command.args(["--add-host", add_host]);
         }
     }
 }
