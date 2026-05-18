@@ -99,10 +99,7 @@ impl Source {
         }
     }
 
-    pub async fn detect_builder(&self) -> Result<Builder> {
-        // TODO obviously
-        let registry = std::env::var("REGISTRY").unwrap_or("localhost:5000".to_string());
-
+    pub async fn detect_builder(&self, registry: &str) -> Result<Builder> {
         match self {
             Source::Git {
                 name,
@@ -115,7 +112,7 @@ impl Source {
                     Ok(Builder::Dockerfile(
                         path.to_path_buf(),
                         Image {
-                            registry: registry.to_string(),
+                            registry: registry.to_owned(),
                             owner: owner.to_string(),
                             repository: name.to_string(),
                             tag: revision.to_string(),
@@ -134,7 +131,7 @@ impl Source {
                     Ok(Builder::Nixpacks(
                         path.to_path_buf(),
                         Image {
-                            registry: registry.to_string(),
+                            registry: registry.to_owned(),
                             owner: owner.to_string(),
                             repository: name.to_string(),
                             tag: revision.to_string(),
@@ -147,7 +144,7 @@ impl Source {
             Source::Docker(image) => Ok(Builder::Vendor(
                 image.clone(),
                 Image {
-                    registry: registry.to_string(),
+                    registry: registry.to_owned(),
                     owner: image.owner.clone(),
                     repository: image.repository.clone(),
                     tag: image.tag.clone(),
@@ -187,7 +184,7 @@ mod tests {
             revision: "".to_string(),
             path: PathBuf::from("testdata/example-service"),
         };
-        let builder = source.detect_builder().await.unwrap();
+        let builder = source.detect_builder("localhost:5000").await.unwrap();
 
         assert!(matches!(builder, Builder::Nixpacks { .. }))
     }
@@ -201,7 +198,7 @@ mod tests {
             revision: "".to_string(),
             path: PathBuf::from("testdata/micropaas"),
         };
-        let builder = source.detect_builder().await.unwrap();
+        let builder = source.detect_builder("localhost:5000").await.unwrap();
 
         assert!(matches!(builder, Builder::Dockerfile { .. }))
     }

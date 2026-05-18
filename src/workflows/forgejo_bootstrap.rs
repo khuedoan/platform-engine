@@ -2,12 +2,11 @@ use std::time::Duration;
 
 use crate::activities::{
     ForgejoEnsureCollaboratorInput, ForgejoEnsureGitopsRepoSeededInput, ForgejoEnsureRepoInput,
-    ForgejoEnsureUserInput, ForgejoEnsureWebhookInput,
+    ForgejoEnsureUserInput, ForgejoEnsureWebhookInput, PlatformActivities,
 };
-use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
-use temporal_sdk::{ActivityOptions, WfContext, WfExitValue, WorkflowResult};
-use temporal_sdk_core_protos::coresdk::AsJsonPayloadExt;
+use temporalio_macros::{workflow, workflow_methods};
+use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowContextView, WorkflowResult};
 use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,102 +53,92 @@ impl ForgejoBootstrapInput {
     }
 }
 
-pub fn name() -> String {
-    "forgejo_bootstrap".to_string()
+#[workflow]
+pub struct ForgejoBootstrapWorkflow {
+    input: ForgejoBootstrapInput,
 }
 
-pub async fn definition(ctx: WfContext) -> WorkflowResult<()> {
-    let input: ForgejoBootstrapInput = serde_json::from_slice(
-        &ctx.get_args()
-            .first()
-            .ok_or(anyhow!("missing workflow input"))?
-            .data,
-    )?;
-    info!("starting Forgejo bootstrap: {input:?}");
-
-    ctx.activity(ActivityOptions {
-        activity_type: "forgejo_wait".to_string(),
-        input: input.forgejo_url.as_json_payload()?,
-        start_to_close_timeout: Some(Duration::from_secs(300)),
-        ..Default::default()
-    })
-    .await
-    .success_payload_or_error()?;
-
-    ctx.activity(ActivityOptions {
-        activity_type: "forgejo_ensure_user".to_string(),
-        input: ForgejoEnsureUserInput {
-            forgejo_url: input.forgejo_url.clone(),
-            username: input.bot_username.clone(),
-            email: input.bot_email.clone(),
-        }
-        .as_json_payload()?,
-        start_to_close_timeout: Some(Duration::from_secs(60)),
-        ..Default::default()
-    })
-    .await
-    .success_payload_or_error()?;
-
-    ctx.activity(ActivityOptions {
-        activity_type: "forgejo_ensure_repo".to_string(),
-        input: ForgejoEnsureRepoInput {
-            forgejo_url: input.forgejo_url.clone(),
-            repo: input.gitops_repo.clone(),
-            private: false,
-        }
-        .as_json_payload()?,
-        start_to_close_timeout: Some(Duration::from_secs(60)),
-        ..Default::default()
-    })
-    .await
-    .success_payload_or_error()?;
-
-    ctx.activity(ActivityOptions {
-        activity_type: "forgejo_ensure_collaborator".to_string(),
-        input: ForgejoEnsureCollaboratorInput {
-            forgejo_url: input.forgejo_url.clone(),
-            repo: input.gitops_repo.clone(),
-            username: input.bot_username.clone(),
-            permission: "write".to_string(),
-        }
-        .as_json_payload()?,
-        start_to_close_timeout: Some(Duration::from_secs(60)),
-        ..Default::default()
-    })
-    .await
-    .success_payload_or_error()?;
-
-    ctx.activity(ActivityOptions {
-        activity_type: "forgejo_ensure_gitops_repo_seeded".to_string(),
-        input: ForgejoEnsureGitopsRepoSeededInput {
-            forgejo_url: input.forgejo_url.clone(),
-            repo: input.gitops_repo.clone(),
-            source_url: input.gitops_source_url.clone(),
-            revision: input.gitops_revision.clone(),
-        }
-        .as_json_payload()?,
-        start_to_close_timeout: Some(Duration::from_secs(600)),
-        ..Default::default()
-    })
-    .await
-    .success_payload_or_error()?;
-
-    for repo in input.webhook_repos {
-        ctx.activity(ActivityOptions {
-            activity_type: "forgejo_ensure_webhook".to_string(),
-            input: ForgejoEnsureWebhookInput {
-                forgejo_url: input.forgejo_url.clone(),
-                repo,
-                webhook_url: input.webhook_url.clone(),
-                legacy_webhook_url: input.legacy_webhook_url.clone(),
-            }
-            .as_json_payload()?,
-            start_to_close_timeout: Some(Duration::from_secs(60)),
-            ..Default::default()
-        })
-        .await
-        .success_payload_or_error()?;
+#[workflow_methods]
+impl ForgejoBootstrapWorkflow {
+    #[init]
+    fn new(_ctx: &WorkflowContextView, input: ForgejoBootstrapInput) -> Self {
+        Self { input }
     }
 
-    Ok(WfExitValue::Normal(()))
+    #[run]
+    pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<()> {
+        let input = ctx.state(|state| state.input.clone());
+        if !ctx.is_replaying() {
+            info!("starting Forgejo bootstrap: {input:?}");
+        }
+
+        ctx.start_activity(
+            PlatformActivities::forgejo_wait,
+            input.forgejo_url.clone(),
+            ActivityOptions::start_to_close_timeout(Duration::from_secs(300)),
+        )
+        .await?;
+
+        ctx.start_activity(
+            PlatformActivities::forgejo_ensure_user,
+            ForgejoEnsureUserInput {
+                forgejo_url: input.forgejo_url.clone(),
+                username: input.bot_username.clone(),
+                email: input.bot_email.clone(),
+            },
+            ActivityOptions::start_to_close_timeout(Duration::from_secs(60)),
+        )
+        .await?;
+
+        ctx.start_activity(
+            PlatformActivities::forgejo_ensure_repo,
+            ForgejoEnsureRepoInput {
+                forgejo_url: input.forgejo_url.clone(),
+                repo: input.gitops_repo.clone(),
+                private: false,
+            },
+            ActivityOptions::start_to_close_timeout(Duration::from_secs(60)),
+        )
+        .await?;
+
+        ctx.start_activity(
+            PlatformActivities::forgejo_ensure_collaborator,
+            ForgejoEnsureCollaboratorInput {
+                forgejo_url: input.forgejo_url.clone(),
+                repo: input.gitops_repo.clone(),
+                username: input.bot_username.clone(),
+                permission: "write".to_string(),
+            },
+            ActivityOptions::start_to_close_timeout(Duration::from_secs(60)),
+        )
+        .await?;
+
+        ctx.start_activity(
+            PlatformActivities::forgejo_ensure_gitops_repo_seeded,
+            ForgejoEnsureGitopsRepoSeededInput {
+                forgejo_url: input.forgejo_url.clone(),
+                repo: input.gitops_repo.clone(),
+                source_url: input.gitops_source_url.clone(),
+                revision: input.gitops_revision.clone(),
+            },
+            ActivityOptions::start_to_close_timeout(Duration::from_secs(600)),
+        )
+        .await?;
+
+        for repo in input.webhook_repos {
+            ctx.start_activity(
+                PlatformActivities::forgejo_ensure_webhook,
+                ForgejoEnsureWebhookInput {
+                    forgejo_url: input.forgejo_url.clone(),
+                    repo,
+                    webhook_url: input.webhook_url.clone(),
+                    legacy_webhook_url: input.legacy_webhook_url.clone(),
+                },
+                ActivityOptions::start_to_close_timeout(Duration::from_secs(60)),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
 }

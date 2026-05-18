@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Router,
     body::Bytes,
@@ -17,7 +17,35 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Clone)]
 struct AppState {
-    client: Arc<temporal_client::RetryClient<temporal_client::Client>>,
+    client: Arc<temporalio_client::Client>,
+    config: AppConfig,
+}
+
+#[derive(Clone)]
+struct AppConfig {
+    gitops_url: String,
+    gitops_revision: String,
+    app_cluster: String,
+    registry: String,
+}
+
+impl AppConfig {
+    fn from_env() -> Result<Self> {
+        let gitops_base_url = std::env::var("GITOPS_URL").context("GITOPS_URL is required")?;
+        let gitops_url = if gitops_base_url.ends_with(".git") {
+            gitops_base_url
+        } else {
+            format!("{gitops_base_url}.git")
+        };
+
+        Ok(Self {
+            gitops_url,
+            gitops_revision: std::env::var("GITOPS_REVISION")
+                .unwrap_or_else(|_| "master".to_string()),
+            app_cluster: std::env::var("APP_CLUSTER").unwrap_or_else(|_| "production".to_string()),
+            registry: std::env::var("REGISTRY").unwrap_or_else(|_| "localhost:5000".to_string()),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -49,6 +77,7 @@ async fn main() -> Result<()> {
     let client = temporal::get_client().await?;
     let state = AppState {
         client: Arc::new(client),
+        config: AppConfig::from_env()?,
     };
 
     let app = Router::new()
@@ -113,27 +142,16 @@ async fn handle_gitea_webhook(
                 &revision[..std::cmp::min(12, revision.len())]
             );
 
-            // Create gitops URL with .git extension if not present
-            let gitops_base_url = std::env::var("GITOPS_URL").unwrap();
-            let gitops_url = if gitops_base_url.ends_with(".git") {
-                gitops_base_url
-            } else {
-                format!("{gitops_base_url}.git")
-            };
-
             let push_to_deploy_input =
                 platform_engine::workflows::push_to_deploy::PushToDeployInput {
                     source,
-                    gitops_url,
-                    gitops_revision: std::env::var("GITOPS_REVISION")
-                        .unwrap_or_else(|_| "master".to_string()),
+                    gitops_url: state.config.gitops_url.clone(),
+                    gitops_revision: state.config.gitops_revision.clone(),
                     namespace: owner,
                     app: repo_name.clone(),
                     // TODO detect this based on branching strategy
-                    cluster: std::env::var("APP_CLUSTER")
-                        .unwrap_or_else(|_| "production".to_string()),
-                    registry: std::env::var("REGISTRY")
-                        .unwrap_or_else(|_| "localhost:5000".to_string()),
+                    cluster: state.config.app_cluster.clone(),
+                    registry: state.config.registry.clone(),
                 };
 
             // Start workflow
