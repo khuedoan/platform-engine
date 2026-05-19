@@ -258,8 +258,12 @@ async fn ensure_buildx_builder(
         &config_path,
         "--buildkitd-flags",
         "--allow-insecure-entitlement network.host",
-        "--bootstrap",
     ]);
+    if let Some(network) = docker_buildx_driver_network() {
+        let driver_opt = format!("network={network}");
+        command.args(["--driver-opt", &driver_opt]);
+    }
+    command.arg("--bootstrap");
 
     let output = run_command(ctx, &mut command, "docker buildx create").await?;
     if output.status.success() || buildx_builder_exists(ctx, &builder).await? {
@@ -343,7 +347,25 @@ fn docker_buildx_builder_name(registry: &str) -> String {
         .ok()
         .map(|builder| builder.trim().to_string())
         .filter(|builder| !builder.is_empty())
-        .unwrap_or_else(|| format!("platform-engine-{}", sanitize_buildx_name(registry)))
+        .unwrap_or_else(|| {
+            let identity = docker_buildx_driver_network()
+                .map(|network| format!("{registry}-{network}"))
+                .unwrap_or_else(|| registry.to_string());
+            format!("platform-engine-{}", sanitize_buildx_name(&identity))
+        })
+}
+
+fn docker_buildx_driver_network() -> Option<String> {
+    env::var("DOCKER_BUILDX_DRIVER_NETWORK")
+        .ok()
+        .map(|network| network.trim().to_string())
+        .filter(|network| !network.is_empty())
+        .or_else(|| {
+            env::var("DOCKER_BUILD_NETWORK")
+                .ok()
+                .map(|network| network.trim().to_string())
+                .filter(|network| network == "host")
+        })
 }
 
 fn buildkitd_config(registry: &str) -> String {
@@ -425,6 +447,14 @@ mod tests {
         assert_eq!(
             buildkitd_config_for_registry("docker.io", false),
             "insecure-entitlements = [\"network.host\"]\n"
+        );
+    }
+
+    #[test]
+    fn sanitize_buildx_name_removes_registry_separators() {
+        assert_eq!(
+            sanitize_buildx_name("registry.registry.svc.cluster.local-host"),
+            "registry-registry-svc-cluster-local-host"
         );
     }
 }
