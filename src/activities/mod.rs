@@ -1,13 +1,15 @@
 mod app;
 mod forgejo;
 mod git;
+mod git_auth;
 mod process;
+mod workspace;
 
 pub use app::*;
 pub use forgejo::*;
 pub use git::*;
 
-use crate::core::app::{builder::Builder, image::Image, source::Source};
+use crate::core::app::image::Image;
 use temporalio_macros::activities;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 
@@ -17,66 +19,19 @@ pub struct PlatformActivities;
 #[activities]
 impl PlatformActivities {
     #[activity]
-    pub async fn app_source_pull(
+    pub async fn publish_image_from_source(
         ctx: ActivityContext,
-        input: AppSourcePullInput,
-    ) -> Result<Source, ActivityError> {
-        app_source_pull(ctx, input).await
-    }
-
-    #[activity]
-    pub async fn app_source_detect(
-        ctx: ActivityContext,
-        input: AppSourceDetectInput,
-    ) -> Result<Builder, ActivityError> {
-        app_source_detect(ctx, input).await
-    }
-
-    #[activity]
-    pub async fn app_build(
-        ctx: ActivityContext,
-        input: AppBuildInput,
+        input: PublishImageFromSourceInput,
     ) -> Result<Image, ActivityError> {
-        app_build(ctx, input).await
+        publish_image_from_source(ctx, input).await
     }
 
     #[activity]
-    pub async fn image_push(
+    pub async fn update_gitops_image(
         ctx: ActivityContext,
-        input: ImagePushInput,
-    ) -> Result<Image, ActivityError> {
-        image_push(ctx, input).await
-    }
-
-    #[activity]
-    pub async fn clone(ctx: ActivityContext, input: CloneInput) -> Result<String, ActivityError> {
-        clone(ctx, input).await
-    }
-
-    #[activity]
-    pub async fn update_app_version(
-        ctx: ActivityContext,
-        input: UpdateAppVersionInput,
-    ) -> Result<bool, ActivityError> {
-        update_app_version(ctx, input).await
-    }
-
-    #[activity]
-    pub async fn git_add(ctx: ActivityContext, input: GitAddInput) -> Result<(), ActivityError> {
-        git_add(ctx, input).await
-    }
-
-    #[activity]
-    pub async fn git_commit(
-        ctx: ActivityContext,
-        input: GitCommitInput,
-    ) -> Result<(), ActivityError> {
-        git_commit(ctx, input).await
-    }
-
-    #[activity]
-    pub async fn git_push(ctx: ActivityContext, input: GitPushInput) -> Result<(), ActivityError> {
-        git_push(ctx, input).await
+        input: UpdateGitopsImageInput,
+    ) -> Result<UpdateGitopsImageResult, ActivityError> {
+        update_gitops_image(ctx, input).await
     }
 
     #[activity]

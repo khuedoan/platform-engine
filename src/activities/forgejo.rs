@@ -1,4 +1,4 @@
-use super::process::{command_error, run_command};
+use super::{git_auth::authenticated_git_command, process::run_checked_command};
 use anyhow::{Context, anyhow};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -219,13 +219,9 @@ pub async fn forgejo_ensure_gitops_repo_seeded(
         input.forgejo_url.trim_end_matches('/'),
         input.repo
     );
-    let mut command = authenticated_git_command();
+    let mut command = forgejo_git_command();
     command.args(["ls-remote", &target_url, "HEAD"]);
-    let output = run_command(&ctx, &mut command, "git ls-remote GitOps repo").await?;
-
-    if !output.status.success() {
-        return Err(command_error("git ls-remote GitOps repo", &output).into());
-    }
+    let output = run_checked_command(&ctx, &mut command, "git ls-remote GitOps repo").await?;
 
     if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
         return Ok(());
@@ -243,22 +239,14 @@ pub async fn forgejo_ensure_gitops_repo_seeded(
     command
         .args(["clone", "--branch", &input.revision, &input.source_url])
         .arg(&workspace);
-    let output = run_command(&ctx, &mut command, "git clone GitOps source repo").await?;
-
-    if !output.status.success() {
-        return Err(command_error("git clone GitOps source repo", &output).into());
-    }
+    run_checked_command(&ctx, &mut command, "git clone GitOps source repo").await?;
 
     let branch_ref = format!("HEAD:refs/heads/{}", input.revision);
-    let mut command = authenticated_git_command();
+    let mut command = forgejo_git_command();
     command
         .args(["push", &target_url, &branch_ref])
         .current_dir(&workspace);
-    let output = run_command(&ctx, &mut command, "git push GitOps seed").await?;
-
-    if !output.status.success() {
-        return Err(command_error("git push GitOps seed", &output).into());
-    }
+    run_checked_command(&ctx, &mut command, "git push GitOps seed").await?;
 
     Ok(())
 }
@@ -364,21 +352,9 @@ fn forgejo_status_error(
     )
 }
 
-fn authenticated_git_command() -> Command {
-    let mut command = Command::new("git");
-    command
-        .env(
-            "GIT_USERNAME",
-            env::var("FORGEJO_ADMIN_USERNAME").unwrap_or_default(),
-        )
-        .env(
-            "GIT_PASSWORD",
-            env::var("FORGEJO_ADMIN_PASSWORD").unwrap_or_default(),
-        )
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .args([
-            "-c",
-            "credential.helper=!f() { echo username=$GIT_USERNAME; echo password=$GIT_PASSWORD; }; f",
-        ]);
-    command
+fn forgejo_git_command() -> Command {
+    authenticated_git_command(
+        &env::var("FORGEJO_ADMIN_USERNAME").unwrap_or_default(),
+        &env::var("FORGEJO_ADMIN_PASSWORD").unwrap_or_default(),
+    )
 }

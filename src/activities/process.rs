@@ -38,6 +38,28 @@ pub async fn run_command(
     }
 }
 
+pub async fn run_checked_command(
+    ctx: &ActivityContext,
+    command: &mut Command,
+    operation: &str,
+) -> Result<Output, ActivityError> {
+    let output = run_command(ctx, command, operation).await?;
+    if !output.status.success() {
+        return Err(command_error(operation, &output).into());
+    }
+
+    Ok(output)
+}
+
+pub async fn run_stdout_command(
+    ctx: &ActivityContext,
+    command: &mut Command,
+    operation: &str,
+) -> Result<String, ActivityError> {
+    let output = run_checked_command(ctx, command, operation).await?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 pub fn command_error(operation: &str, output: &Output) -> anyhow::Error {
     anyhow!(
         "{operation} failed\n{}{}",

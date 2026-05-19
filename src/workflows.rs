@@ -26,6 +26,7 @@ use temporalio_common::{
 use tracing::{error, info, warn};
 
 pub mod forgejo_bootstrap;
+mod options;
 pub mod push_to_deploy;
 
 const FORGEJO_BOOTSTRAP_SCHEDULE_ID: &str = "forgejo-bootstrap";

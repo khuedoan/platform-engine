@@ -1,4 +1,8 @@
-use super::process::{command_error, run_command};
+use super::{
+    git_auth::git_command_for_url,
+    process::{run_checked_command, run_command},
+    workspace::TempWorkspace,
+};
 use crate::core::app::{builder::Builder, image::Image, source::Source};
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
@@ -8,15 +12,58 @@ use tokio::{fs::remove_dir_all, process::Command};
 use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppSourcePullInput {
+pub struct PublishImageFromSourceInput {
     pub source: Source,
+    pub registry: String,
 }
 
-pub async fn app_source_pull(
+pub async fn publish_image_from_source(
     ctx: ActivityContext,
-    input: AppSourcePullInput,
-) -> Result<Source, ActivityError> {
-    match input.source {
+    input: PublishImageFromSourceInput,
+) -> Result<Image, ActivityError> {
+    let (_workspace, source) = source_with_activity_workspace(input.source);
+    let source = pull_source(&ctx, source).await?;
+    let builder = detect_builder(&ctx, &source, &input.registry).await?;
+    let image = builder_image(&builder);
+
+    if image_exists_in_registry(&ctx, &image).await? {
+        info!(image = %image, "image already exists in registry");
+        return Ok(image);
+    }
+
+    let image = build_image(&ctx, builder).await?;
+    push_image(&ctx, &image).await?;
+    Ok(image)
+}
+
+fn source_with_activity_workspace(source: Source) -> (Option<TempWorkspace>, Source) {
+    match source {
+        Source::Git {
+            name,
+            owner,
+            url,
+            revision,
+            ..
+        } => {
+            let workspace = TempWorkspace::new("source", &url, &revision);
+            let path = workspace.path().to_path_buf();
+            (
+                Some(workspace),
+                Source::Git {
+                    name,
+                    owner,
+                    url,
+                    revision,
+                    path,
+                },
+            )
+        }
+        Source::Docker(image) => (None, Source::Docker(image)),
+    }
+}
+
+async fn pull_source(ctx: &ActivityContext, source: Source) -> Result<Source, ActivityError> {
+    match source {
         Source::Git {
             name,
             owner,
@@ -29,49 +76,31 @@ pub async fn app_source_pull(
                 remove_dir_all(&path).await.map_err(|e| anyhow!(e))?;
             }
 
-            let path_arg = path.display().to_string();
-            let mut command = Command::new("git");
-            command.args(["init", &path_arg]);
-            let output = run_command(&ctx, &mut command, "git init repository").await?;
-            if !output.status.success() {
-                return Err(command_error("git init repository", &output).into());
-            }
-
             tokio::fs::create_dir_all(&path)
                 .await
                 .map_err(|e| anyhow!(e))?;
 
             let mut command = Command::new("git");
             command.args(["init"]).current_dir(&path);
-            let output = run_command(&ctx, &mut command, "git init workspace").await?;
-            if !output.status.success() {
-                return Err(command_error("git init workspace", &output).into());
-            }
+            run_checked_command(ctx, &mut command, "git init workspace").await?;
 
             let mut command = Command::new("git");
             command
                 .args(["remote", "add", "origin", &url])
                 .current_dir(&path);
-            let output = run_command(&ctx, &mut command, "git add remote").await?;
-            if !output.status.success() {
-                return Err(command_error("git add remote", &output).into());
-            }
+            run_checked_command(ctx, &mut command, "git add remote").await?;
 
-            let mut command = Command::new("git");
+            let git_username = env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
+            let git_password = env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
+            let mut command = git_command_for_url(&url, &git_username, &git_password);
             command
                 .args(["fetch", "--depth", "1", "origin", &revision])
                 .current_dir(&path);
-            let output = run_command(&ctx, &mut command, "git fetch").await?;
-            if !output.status.success() {
-                return Err(command_error("git fetch", &output).into());
-            }
+            run_checked_command(ctx, &mut command, "git fetch").await?;
 
             let mut command = Command::new("git");
-            command.args(["checkout", &revision]).current_dir(&path);
-            let output = run_command(&ctx, &mut command, "git checkout").await?;
-            if !output.status.success() {
-                return Err(command_error("git checkout", &output).into());
-            }
+            command.args(["checkout", "FETCH_HEAD"]).current_dir(&path);
+            run_checked_command(ctx, &mut command, "git checkout").await?;
 
             Ok(Source::Git {
                 name,
@@ -81,50 +110,87 @@ pub async fn app_source_pull(
                 path,
             })
         }
-        Source::Docker(_image) => todo!(),
+        Source::Docker(image) => Ok(Source::Docker(image)),
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppSourceDetectInput {
-    pub source: Source,
-    pub registry: String,
-}
-
-pub async fn app_source_detect(
-    ctx: ActivityContext,
-    input: AppSourceDetectInput,
+async fn detect_builder(
+    ctx: &ActivityContext,
+    source: &Source,
+    registry: &str,
 ) -> Result<Builder, ActivityError> {
     if ctx.is_cancelled() {
         return Err(ActivityError::cancelled());
     }
-    Ok(input.source.detect_builder(&input.registry).await?)
+
+    match source {
+        Source::Git {
+            name,
+            owner,
+            revision,
+            path,
+            ..
+        } => {
+            let image = Image {
+                registry: registry.to_owned(),
+                owner: owner.to_string(),
+                repository: name.to_string(),
+                tag: revision.to_string(),
+            };
+
+            if path.join("Dockerfile").exists() {
+                return Ok(Builder::Dockerfile(path.to_path_buf(), image));
+            }
+
+            let mut command = Command::new("nixpacks");
+            command.args(["detect", "."]).current_dir(path);
+            let output = run_command(ctx, &mut command, "nixpacks detect").await?;
+            if output.status.success() && output.stdout.len() > 1 {
+                Ok(Builder::Nixpacks(path.to_path_buf(), image))
+            } else {
+                Err(anyhow!("no buildable code detected").into())
+            }
+        }
+        Source::Docker(image) => Ok(Builder::Vendor(
+            image.clone(),
+            Image {
+                registry: registry.to_owned(),
+                owner: image.owner.clone(),
+                repository: image.repository.clone(),
+                tag: image.tag.clone(),
+            },
+        )),
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppBuildInput {
-    pub builder: Builder,
+fn builder_image(builder: &Builder) -> Image {
+    match builder {
+        Builder::Dockerfile(_, image) | Builder::Nixpacks(_, image) => image.clone(),
+        Builder::Vendor(_, image) => image.clone(),
+    }
 }
 
-pub async fn app_build(ctx: ActivityContext, input: AppBuildInput) -> Result<Image, ActivityError> {
-    match input.builder {
+async fn image_exists_in_registry(
+    ctx: &ActivityContext,
+    image: &Image,
+) -> Result<bool, ActivityError> {
+    let image_ref = format!("{image}");
+    let mut command = Command::new("docker");
+    command.args(["manifest", "inspect", &image_ref]);
+    let output = run_command(ctx, &mut command, "docker manifest inspect").await?;
+    Ok(output.status.success())
+}
+
+async fn build_image(ctx: &ActivityContext, builder: Builder) -> Result<Image, ActivityError> {
+    match builder {
         Builder::Dockerfile(path, image) => {
             info!("building container image with Dockerfile");
             let image_ref = format!("{image}");
             let mut command = Command::new("docker");
             command.args(["build", "."]);
             configure_docker_build_network(&mut command);
-
-            let output = run_command(
-                &ctx,
-                command.args(["--tag", &image_ref]).current_dir(path),
-                "docker build",
-            )
-            .await?;
-            if !output.status.success() {
-                return Err(command_error("docker build", &output).into());
-            }
-
+            command.args(["--tag", &image_ref]).current_dir(path);
+            run_checked_command(ctx, &mut command, "docker build").await?;
             Ok(image)
         }
         Builder::Nixpacks(path, image) => {
@@ -134,35 +200,32 @@ pub async fn app_build(ctx: ActivityContext, input: AppBuildInput) -> Result<Ima
             command
                 .args(["build", ".", "--tag", &image_ref])
                 .current_dir(path);
-            let output = run_command(&ctx, &mut command, "nixpacks build").await?;
-            if !output.status.success() {
-                return Err(command_error("nixpacks build", &output).into());
-            }
+            run_checked_command(ctx, &mut command, "nixpacks build").await?;
+            Ok(image)
+        }
+        Builder::Vendor(source_image, image) => {
+            let source_ref = format!("{source_image}");
+            let image_ref = format!("{image}");
+
+            let mut command = Command::new("docker");
+            command.args(["pull", &source_ref]);
+            run_checked_command(ctx, &mut command, "docker pull source image").await?;
+
+            let mut command = Command::new("docker");
+            command.args(["tag", &source_ref, &image_ref]);
+            run_checked_command(ctx, &mut command, "docker tag source image").await?;
 
             Ok(image)
         }
-        Builder::Vendor(source_image, _image) => Ok(source_image.rename().await?),
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImagePushInput {
-    pub image: Image,
-}
-
-pub async fn image_push(
-    ctx: ActivityContext,
-    input: ImagePushInput,
-) -> Result<Image, ActivityError> {
-    let image_ref = format!("{}", input.image);
+async fn push_image(ctx: &ActivityContext, image: &Image) -> Result<(), ActivityError> {
+    let image_ref = format!("{image}");
     let mut command = Command::new("docker");
     command.args(["push", &image_ref]);
-    let output = run_command(&ctx, &mut command, "docker push").await?;
-    if !output.status.success() {
-        return Err(command_error("docker push", &output).into());
-    }
-
-    Ok(input.image)
+    run_checked_command(ctx, &mut command, "docker push").await?;
+    Ok(())
 }
 
 fn configure_docker_build_network(command: &mut Command) {

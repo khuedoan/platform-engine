@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use super::options::command_activity_options;
 use crate::activities::{
     ForgejoEnsureCollaboratorInput, ForgejoEnsureGitopsRepoSeededInput, ForgejoEnsureRepoInput,
     ForgejoEnsureUserInput, ForgejoEnsureWebhookInput, PlatformActivities,
@@ -8,8 +9,6 @@ use serde::{Deserialize, Serialize};
 use temporalio_macros::{workflow, workflow_methods};
 use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowContextView, WorkflowResult};
 use tracing::info;
-
-const COMMAND_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgejoBootstrapInput {
@@ -143,10 +142,4 @@ impl ForgejoBootstrapWorkflow {
 
         Ok(())
     }
-}
-
-fn command_activity_options(timeout: Duration) -> ActivityOptions {
-    ActivityOptions::with_start_to_close_timeout(timeout)
-        .heartbeat_timeout(COMMAND_HEARTBEAT_TIMEOUT)
-        .build()
 }

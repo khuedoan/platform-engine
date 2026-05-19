@@ -1,79 +1,146 @@
-use super::process::{command_error, run_command};
+use super::{
+    git_auth::git_command_for_url,
+    process::{run_checked_command, run_stdout_command},
+    workspace::TempWorkspace,
+};
+use crate::core::app::image::Image;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tokio::{fs::remove_dir_all, process::Command};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloneInput {
+pub struct UpdateGitopsImageInput {
     pub url: String,
     pub revision: String,
+    pub namespace: String,
+    pub app: String,
+    pub cluster: String,
+    pub image: Image,
 }
 
-pub async fn clone(ctx: ActivityContext, input: CloneInput) -> Result<String, ActivityError> {
-    let sanitized_url = input.url.replace(['/', ':'], "-");
-    let workspace = format!(
-        "/tmp/clone-{}-{}",
-        sanitized_url,
-        &input.revision[..std::cmp::min(8, input.revision.len())]
-    );
-    let workspace_path = PathBuf::from(&workspace);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateGitopsImageResult {
+    pub changed: bool,
+    pub commit_sha: Option<String>,
+}
 
-    if workspace_path.exists() {
-        remove_dir_all(&workspace_path)
-            .await
-            .map_err(|e| anyhow!(e))?;
+pub async fn update_gitops_image(
+    ctx: ActivityContext,
+    input: UpdateGitopsImageInput,
+) -> Result<UpdateGitopsImageResult, ActivityError> {
+    let workspace = TempWorkspace::new("gitops", &input.url, &input.revision);
+    clone_repo(&ctx, &input.url, &input.revision, workspace.path()).await?;
+    configure_git_user(&ctx, workspace.path()).await?;
+
+    let apps_dir = workspace.path().join("apps");
+    let repository = format!(
+        "{}/{}/{}",
+        input.image.registry, input.image.owner, input.image.repository
+    );
+    let changed = update_app_version_inner(UpdateAppVersionInput {
+        apps_dir: apps_dir.to_string_lossy().to_string(),
+        namespace: input.namespace.clone(),
+        app: input.app.clone(),
+        cluster: input.cluster.clone(),
+        new_images: vec![AppImageUpdate {
+            repository,
+            tag: input.image.tag.clone(),
+        }],
+    })
+    .await?;
+
+    if !changed {
+        return Ok(UpdateGitopsImageResult {
+            changed: false,
+            commit_sha: None,
+        });
     }
 
-    tokio::fs::create_dir_all(&workspace_path)
-        .await
-        .map_err(|e| anyhow!(e))?;
+    let app_file_path = Path::new("apps")
+        .join(&input.namespace)
+        .join(&input.app)
+        .join(format!("{}.yaml", input.cluster));
+    let app_file_path = app_file_path.to_string_lossy().to_string();
+
+    let mut command = Command::new("git");
+    command
+        .args(["add", &app_file_path])
+        .current_dir(workspace.path());
+    run_checked_command(&ctx, &mut command, "git add app version").await?;
+
+    let commit_message = format!(
+        "chore({}/{}): update {} version",
+        input.namespace, input.app, input.cluster
+    );
+    let mut command = Command::new("git");
+    command
+        .args(["commit", "-m", &commit_message])
+        .current_dir(workspace.path());
+    run_checked_command(&ctx, &mut command, "git commit app version").await?;
+
+    let mut command = Command::new("git");
+    command
+        .args(["rev-parse", "HEAD"])
+        .current_dir(workspace.path());
+    let commit_sha = run_stdout_command(&ctx, &mut command, "git rev-parse HEAD").await?;
 
     let git_username = env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
     let git_password = env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
-
-    let mut command = if input.url.starts_with("http://") || input.url.starts_with("https://") {
-        authenticated_git_command(&git_username, &git_password)
-    } else {
-        Command::new("git")
-    };
+    let mut command = git_command_for_url(&input.url, &git_username, &git_password);
+    let branch_ref = format!("HEAD:{}", input.revision);
     command
-        .args(["clone", "--branch", &input.revision, &input.url, "."])
-        .current_dir(&workspace_path);
-    let output = run_command(&ctx, &mut command, "git clone").await?;
+        .args(["push", "origin", &branch_ref])
+        .current_dir(workspace.path());
+    run_checked_command(&ctx, &mut command, "git push app version").await?;
 
-    if !output.status.success() {
-        return Err(command_error("git clone", &output).into());
+    Ok(UpdateGitopsImageResult {
+        changed: true,
+        commit_sha: Some(commit_sha),
+    })
+}
+
+async fn clone_repo(
+    ctx: &ActivityContext,
+    url: &str,
+    revision: &str,
+    workspace: &Path,
+) -> Result<(), ActivityError> {
+    if workspace.exists() {
+        remove_dir_all(workspace).await.map_err(|e| anyhow!(e))?;
     }
 
+    let git_username = env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
+    let git_password = env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
+    let mut command = git_command_for_url(url, &git_username, &git_password);
+    command
+        .args(["clone", "--branch", revision, url])
+        .arg(workspace);
+    run_checked_command(ctx, &mut command, "git clone GitOps repo").await?;
+    Ok(())
+}
+
+async fn configure_git_user(ctx: &ActivityContext, workspace: &Path) -> Result<(), ActivityError> {
     let git_user = env::var("GIT_USER").unwrap_or_else(|_| "Platform Engine".to_string());
     let git_email = env::var("GIT_EMAIL").unwrap_or_else(|_| "platform@example.com".to_string());
 
     let mut command = Command::new("git");
     command
         .args(["config", "user.name", &git_user])
-        .current_dir(&workspace_path);
-    let output = run_command(&ctx, &mut command, "git config user.name").await?;
-
-    if !output.status.success() {
-        return Err(command_error("git config user.name", &output).into());
-    }
+        .current_dir(workspace);
+    run_checked_command(ctx, &mut command, "git config user.name").await?;
 
     let mut command = Command::new("git");
     command
         .args(["config", "user.email", &git_email])
-        .current_dir(&workspace_path);
-    let output = run_command(&ctx, &mut command, "git config user.email").await?;
+        .current_dir(workspace);
+    run_checked_command(ctx, &mut command, "git config user.email").await?;
 
-    if !output.status.success() {
-        return Err(command_error("git config user.email", &output).into());
-    }
-
-    Ok(workspace)
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,13 +156,6 @@ pub struct UpdateAppVersionInput {
     pub app: String,
     pub cluster: String,
     pub new_images: Vec<AppImageUpdate>,
-}
-
-pub async fn update_app_version(
-    _ctx: ActivityContext,
-    input: UpdateAppVersionInput,
-) -> Result<bool, ActivityError> {
-    Ok(update_app_version_inner(input).await?)
 }
 
 pub async fn update_app_version_inner(input: UpdateAppVersionInput) -> anyhow::Result<bool> {
@@ -162,125 +222,11 @@ fn update_image_tags_recursive(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitAddInput {
-    pub file_path: String,
-}
-
-pub async fn git_add(_ctx: ActivityContext, input: GitAddInput) -> Result<(), ActivityError> {
-    let path = PathBuf::from(&input.file_path);
-    let dir = path.parent().ok_or_else(|| anyhow!("invalid file path"))?;
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow!("invalid file path"))?;
-
-    let status = Command::new("git")
-        .args(["-C", dir.to_str().unwrap(), "add", file_name])
-        .status()
-        .await
-        .map_err(|e| anyhow!(e))?;
-
-    if !status.success() {
-        return Err(anyhow!("git add failed").into());
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitCommitInput {
-    pub dir: String,
-    pub message: String,
-}
-
-pub async fn git_commit(_ctx: ActivityContext, input: GitCommitInput) -> Result<(), ActivityError> {
-    let git_user = env::var("GIT_USER").unwrap_or_else(|_| "Platform Engine".to_string());
-    let git_email = env::var("GIT_EMAIL").unwrap_or_else(|_| "platform@example.com".to_string());
-
-    let output = Command::new("git")
-        .args(["-C", &input.dir, "config", "user.name", &git_user])
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("Failed to set git user: {}", stderr).into());
-    }
-
-    let output = Command::new("git")
-        .args(["-C", &input.dir, "config", "user.email", &git_email])
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("Failed to set git email: {}", stderr).into());
-    }
-
-    let status = Command::new("git")
-        .args(["-C", &input.dir, "commit", "-m", &input.message])
-        .status()
-        .await
-        .map_err(|e| anyhow!(e))?;
-    if !status.success() {
-        return Err(anyhow!("git commit failed").into());
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitPushInput {
-    pub dir: String,
-}
-
-pub async fn git_push(ctx: ActivityContext, input: GitPushInput) -> Result<(), ActivityError> {
-    let mut command = Command::new("git");
-    command.args(["-C", &input.dir, "remote", "get-url", "origin"]);
-    let get_url_output = run_command(&ctx, &mut command, "git remote get-url").await?;
-
-    if !get_url_output.status.success() {
-        return Err(command_error("git remote get-url", &get_url_output).into());
-    }
-
-    let current_url = String::from_utf8_lossy(&get_url_output.stdout)
-        .trim()
-        .to_string();
-
-    let mut command = if current_url.starts_with("http://") || current_url.starts_with("https://") {
-        let git_username = env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
-        let git_password = env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
-        authenticated_git_command(&git_username, &git_password)
-    } else {
-        Command::new("git")
-    };
-    command.args(["-C", &input.dir, "push"]);
-    let output = run_command(&ctx, &mut command, "git push").await?;
-    if !output.status.success() {
-        return Err(command_error("git push", &output).into());
-    }
-    Ok(())
-}
-
-fn authenticated_git_command(username: &str, password: &str) -> Command {
-    let mut command = Command::new("git");
-    command
-        .env("GIT_USERNAME", username)
-        .env("GIT_PASSWORD", password)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .args([
-            "-c",
-            "credential.helper=!f() { echo username=$GIT_USERNAME; echo password=$GIT_PASSWORD; }; f",
-        ]);
-    command
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
 
     fn copy_dir_recursive(src: &Path, dst: &Path) {
         if !dst.exists() {
