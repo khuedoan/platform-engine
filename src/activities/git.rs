@@ -36,19 +36,13 @@ pub async fn clone(ctx: ActivityContext, input: CloneInput) -> Result<String, Ac
     let git_username = env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
     let git_password = env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
 
-    let auth_url = if input.url.starts_with("http://") || input.url.starts_with("https://") {
-        let url_without_protocol = input
-            .url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://");
-        format!("http://{git_username}:{git_password}@{url_without_protocol}")
+    let mut command = if input.url.starts_with("http://") || input.url.starts_with("https://") {
+        authenticated_git_command(&git_username, &git_password)
     } else {
-        input.url.clone()
+        Command::new("git")
     };
-
-    let mut command = Command::new("git");
     command
-        .args(["clone", "--branch", &input.revision, &auth_url, "."])
+        .args(["clone", "--branch", &input.revision, &input.url, "."])
         .current_dir(&workspace_path);
     let output = run_command(&ctx, &mut command, "git clone").await?;
 
@@ -243,9 +237,6 @@ pub struct GitPushInput {
 }
 
 pub async fn git_push(ctx: ActivityContext, input: GitPushInput) -> Result<(), ActivityError> {
-    let git_username = env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
-    let git_password = env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
-
     let mut command = Command::new("git");
     command.args(["-C", &input.dir, "remote", "get-url", "origin"]);
     let get_url_output = run_command(&ctx, &mut command, "git remote get-url").await?;
@@ -258,30 +249,32 @@ pub async fn git_push(ctx: ActivityContext, input: GitPushInput) -> Result<(), A
         .trim()
         .to_string();
 
-    if !current_url.contains("@")
-        && (current_url.starts_with("http://") || current_url.starts_with("https://"))
-    {
-        let url_without_protocol = current_url
-            .trim_start_matches("http://")
-            .trim_start_matches("https://");
-        let auth_url = format!("http://{git_username}:{git_password}@{url_without_protocol}");
-
-        let mut command = Command::new("git");
-        command.args(["-C", &input.dir, "remote", "set-url", "origin", &auth_url]);
-        let set_url_output = run_command(&ctx, &mut command, "git remote set-url").await?;
-
-        if !set_url_output.status.success() {
-            return Err(command_error("git remote set-url", &set_url_output).into());
-        }
-    }
-
-    let mut command = Command::new("git");
+    let mut command = if current_url.starts_with("http://") || current_url.starts_with("https://") {
+        let git_username = env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
+        let git_password = env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
+        authenticated_git_command(&git_username, &git_password)
+    } else {
+        Command::new("git")
+    };
     command.args(["-C", &input.dir, "push"]);
     let output = run_command(&ctx, &mut command, "git push").await?;
     if !output.status.success() {
         return Err(command_error("git push", &output).into());
     }
     Ok(())
+}
+
+fn authenticated_git_command(username: &str, password: &str) -> Command {
+    let mut command = Command::new("git");
+    command
+        .env("GIT_USERNAME", username)
+        .env("GIT_PASSWORD", password)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args([
+            "-c",
+            "credential.helper=!f() { echo username=$GIT_USERNAME; echo password=$GIT_PASSWORD; }; f",
+        ]);
+    command
 }
 
 #[cfg(test)]

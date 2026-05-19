@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use std::process::Output;
+use std::process::{Output, Stdio};
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tokio::{
     process::Command,
@@ -19,6 +19,7 @@ pub async fn run_command(
 
     ctx.record_heartbeat(vec![]);
     command.kill_on_drop(true);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = command
         .spawn()
         .map_err(|e| anyhow!("failed to start {operation}: {e}"))?;
