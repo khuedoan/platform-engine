@@ -8,8 +8,13 @@ use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::env;
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
-use tokio::{fs::remove_dir_all, process::Command};
+use tokio::{
+    fs::{remove_dir_all, write},
+    process::Command,
+};
 use tracing::{info, warn};
+
+const BUILD_CACHE_TAG: &str = "buildcache";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishImageFromSourceInput {
@@ -187,10 +192,17 @@ async fn build_image(ctx: &ActivityContext, builder: Builder) -> Result<Image, A
             info!("building container image with Dockerfile");
             let image_ref = format!("{image}");
             let mut command = Command::new("docker");
-            command.args(["build", "."]);
+            command.args(["buildx", "build"]);
+            if docker_build_registry_cache_enabled() {
+                let buildx_builder = ensure_buildx_builder(ctx, &image.registry).await?;
+                command.args(["--builder", &buildx_builder]);
+            }
             configure_docker_build_network(&mut command);
-            command.args(["--tag", &image_ref]).current_dir(path);
-            run_checked_command(ctx, &mut command, "docker build").await?;
+            configure_docker_build_cache(&mut command, &image);
+            command
+                .args(["--load", "--tag", &image_ref, "."])
+                .current_dir(path);
+            run_checked_command(ctx, &mut command, "docker buildx build").await?;
             Ok(image)
         }
         Builder::Nixpacks(path, image) => {
@@ -220,6 +232,53 @@ async fn build_image(ctx: &ActivityContext, builder: Builder) -> Result<Image, A
     }
 }
 
+async fn ensure_buildx_builder(
+    ctx: &ActivityContext,
+    registry: &str,
+) -> Result<String, ActivityError> {
+    let builder = docker_buildx_builder_name(registry);
+    if buildx_builder_exists(ctx, &builder).await? {
+        return Ok(builder);
+    }
+
+    let config_path = format!("/tmp/platform-engine-buildkitd-{builder}.toml");
+    write(&config_path, buildkitd_config(registry))
+        .await
+        .map_err(|e| anyhow!("failed to write BuildKit config: {e}"))?;
+
+    let mut command = Command::new("docker");
+    command.args([
+        "buildx",
+        "create",
+        "--name",
+        &builder,
+        "--driver",
+        "docker-container",
+        "--buildkitd-config",
+        &config_path,
+        "--buildkitd-flags",
+        "--allow-insecure-entitlement network.host",
+        "--bootstrap",
+    ]);
+
+    let output = run_command(ctx, &mut command, "docker buildx create").await?;
+    if output.status.success() || buildx_builder_exists(ctx, &builder).await? {
+        return Ok(builder);
+    }
+
+    Err(super::process::command_error("docker buildx create", &output).into())
+}
+
+async fn buildx_builder_exists(
+    ctx: &ActivityContext,
+    builder: &str,
+) -> Result<bool, ActivityError> {
+    let mut command = Command::new("docker");
+    command.args(["buildx", "inspect", builder]);
+    let output = run_command(ctx, &mut command, "docker buildx inspect").await?;
+    Ok(output.status.success())
+}
+
 async fn push_image(ctx: &ActivityContext, image: &Image) -> Result<(), ActivityError> {
     let image_ref = format!("{image}");
     let mut command = Command::new("docker");
@@ -233,6 +292,9 @@ fn configure_docker_build_network(command: &mut Command) {
         let network = network.trim();
         if !network.is_empty() {
             command.args(["--network", network]);
+            if network == "host" {
+                command.args(["--allow", "network.host"]);
+            }
         }
     }
 
@@ -244,5 +306,125 @@ fn configure_docker_build_network(command: &mut Command) {
         {
             command.args(["--add-host", add_host]);
         }
+    }
+}
+
+fn configure_docker_build_cache(command: &mut Command, image: &Image) {
+    if !docker_build_registry_cache_enabled() {
+        return;
+    }
+
+    let cache_ref = docker_build_cache_ref(image);
+    let cache_from = format!("type=registry,ref={cache_ref}");
+    let cache_to = format!(
+        "type=registry,ref={cache_ref},mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true"
+    );
+    command.args(["--cache-from", &cache_from, "--cache-to", &cache_to]);
+}
+
+fn docker_build_registry_cache_enabled() -> bool {
+    env::var("DOCKER_BUILD_REGISTRY_CACHE").map_or(true, |value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
+}
+
+fn docker_build_cache_ref(image: &Image) -> String {
+    format!(
+        "{}/{}/{}:{BUILD_CACHE_TAG}",
+        image.registry, image.owner, image.repository
+    )
+}
+
+fn docker_buildx_builder_name(registry: &str) -> String {
+    env::var("DOCKER_BUILDX_BUILDER")
+        .ok()
+        .map(|builder| builder.trim().to_string())
+        .filter(|builder| !builder.is_empty())
+        .unwrap_or_else(|| format!("platform-engine-{}", sanitize_buildx_name(registry)))
+}
+
+fn buildkitd_config(registry: &str) -> String {
+    buildkitd_config_for_registry(registry, buildkit_registry_uses_plain_http(registry))
+}
+
+fn buildkitd_config_for_registry(registry: &str, plain_http: bool) -> String {
+    let mut config = String::from("insecure-entitlements = [\"network.host\"]\n");
+    if plain_http {
+        config.push_str(&format!(
+            "\n[registry.\"{registry}\"]\n  http = true\n  insecure = true\n"
+        ));
+    }
+    config
+}
+
+fn buildkit_registry_uses_plain_http(registry: &str) -> bool {
+    env::var("DOCKER_BUILD_REGISTRY_CACHE_HTTP").map_or_else(
+        |_| is_local_or_cluster_registry(registry),
+        |value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        },
+    )
+}
+
+fn is_local_or_cluster_registry(registry: &str) -> bool {
+    registry == "localhost"
+        || registry.starts_with("localhost:")
+        || registry.starts_with("127.")
+        || registry.ends_with(".svc")
+        || registry.contains(".svc.")
+}
+
+fn sanitize_buildx_name(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn docker_build_cache_ref_uses_stable_app_tag() {
+        let image = Image {
+            registry: "registry.registry.svc.cluster.local".to_string(),
+            owner: "khuedoan".to_string(),
+            repository: "blog".to_string(),
+            tag: "revision".to_string(),
+        };
+
+        assert_eq!(
+            docker_build_cache_ref(&image),
+            "registry.registry.svc.cluster.local/khuedoan/blog:buildcache"
+        );
+    }
+
+    #[test]
+    fn buildkitd_config_marks_cluster_registry_as_plain_http() {
+        assert_eq!(
+            buildkitd_config_for_registry("registry.registry.svc.cluster.local", true),
+            "insecure-entitlements = [\"network.host\"]\n\n[registry.\"registry.registry.svc.cluster.local\"]\n  http = true\n  insecure = true\n"
+        );
+    }
+
+    #[test]
+    fn buildkitd_config_leaves_public_registry_on_https() {
+        assert_eq!(
+            buildkitd_config_for_registry("docker.io", false),
+            "insecure-entitlements = [\"network.host\"]\n"
+        );
     }
 }
