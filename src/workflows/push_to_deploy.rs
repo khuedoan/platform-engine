@@ -9,6 +9,8 @@ use temporalio_macros::{workflow, workflow_methods};
 use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowContextView, WorkflowResult};
 use tracing::info;
 
+const COMMAND_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushToDeployInput {
     pub source: Source,
@@ -45,7 +47,7 @@ impl PushToDeployWorkflow {
                 AppSourcePullInput {
                     source: input.source.clone(),
                 },
-                ActivityOptions::start_to_close_timeout(Duration::from_secs(30)),
+                command_activity_options(Duration::from_secs(30)),
             )
             .await?;
 
@@ -65,6 +67,7 @@ impl PushToDeployWorkflow {
                 PlatformActivities::app_build,
                 AppBuildInput { builder },
                 ActivityOptions::with_start_to_close_timeout(Duration::from_secs(600))
+                    .heartbeat_timeout(COMMAND_HEARTBEAT_TIMEOUT)
                     .retry_policy(RetryPolicy {
                         maximum_attempts: 1,
                         ..Default::default()
@@ -77,7 +80,7 @@ impl PushToDeployWorkflow {
             .start_activity(
                 PlatformActivities::image_push,
                 ImagePushInput { image: built_image },
-                ActivityOptions::start_to_close_timeout(Duration::from_secs(600)),
+                command_activity_options(Duration::from_secs(600)),
             )
             .await?;
 
@@ -88,7 +91,7 @@ impl PushToDeployWorkflow {
                     url: input.gitops_url.clone(),
                     revision: input.gitops_revision.clone(),
                 },
-                ActivityOptions::start_to_close_timeout(Duration::from_secs(120)),
+                command_activity_options(Duration::from_secs(120)),
             )
             .await?;
 
@@ -146,7 +149,7 @@ impl PushToDeployWorkflow {
             ctx.start_activity(
                 PlatformActivities::git_push,
                 GitPushInput { dir: workspace },
-                ActivityOptions::start_to_close_timeout(Duration::from_secs(60)),
+                command_activity_options(Duration::from_secs(60)),
             )
             .await?;
             if !ctx.is_replaying() {
@@ -160,4 +163,10 @@ impl PushToDeployWorkflow {
 
         Ok(image)
     }
+}
+
+fn command_activity_options(timeout: Duration) -> ActivityOptions {
+    ActivityOptions::with_start_to_close_timeout(timeout)
+        .heartbeat_timeout(COMMAND_HEARTBEAT_TIMEOUT)
+        .build()
 }

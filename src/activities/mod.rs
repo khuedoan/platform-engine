@@ -1,6 +1,7 @@
 mod app;
 mod forgejo;
 mod git;
+mod process;
 
 pub use app::*;
 pub use forgejo::*;

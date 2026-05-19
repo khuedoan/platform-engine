@@ -1,3 +1,4 @@
+use super::process::{command_error, run_command};
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
@@ -13,7 +14,7 @@ pub struct CloneInput {
     pub revision: String,
 }
 
-pub async fn clone(_ctx: ActivityContext, input: CloneInput) -> Result<String, ActivityError> {
+pub async fn clone(ctx: ActivityContext, input: CloneInput) -> Result<String, ActivityError> {
     let sanitized_url = input.url.replace(['/', ':'], "-");
     let workspace = format!(
         "/tmp/clone-{}-{}",
@@ -45,43 +46,37 @@ pub async fn clone(_ctx: ActivityContext, input: CloneInput) -> Result<String, A
         input.url.clone()
     };
 
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(["clone", "--branch", &input.revision, &auth_url, "."])
-        .current_dir(&workspace_path)
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
+        .current_dir(&workspace_path);
+    let output = run_command(&ctx, &mut command, "git clone").await?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("Failed to clone repository: {}", stderr).into());
+        return Err(command_error("git clone", &output).into());
     }
 
     let git_user = env::var("GIT_USER").unwrap_or_else(|_| "Platform Engine".to_string());
     let git_email = env::var("GIT_EMAIL").unwrap_or_else(|_| "platform@example.com".to_string());
 
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(["config", "user.name", &git_user])
-        .current_dir(&workspace_path)
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
+        .current_dir(&workspace_path);
+    let output = run_command(&ctx, &mut command, "git config user.name").await?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("Failed to set git user: {}", stderr).into());
+        return Err(command_error("git config user.name", &output).into());
     }
 
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(["config", "user.email", &git_email])
-        .current_dir(&workspace_path)
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
+        .current_dir(&workspace_path);
+    let output = run_command(&ctx, &mut command, "git config user.email").await?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("Failed to set git email: {}", stderr).into());
+        return Err(command_error("git config user.email", &output).into());
     }
 
     Ok(workspace)
@@ -247,18 +242,16 @@ pub struct GitPushInput {
     pub dir: String,
 }
 
-pub async fn git_push(_ctx: ActivityContext, input: GitPushInput) -> Result<(), ActivityError> {
+pub async fn git_push(ctx: ActivityContext, input: GitPushInput) -> Result<(), ActivityError> {
     let git_username = env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
     let git_password = env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
 
-    let get_url_output = Command::new("git")
-        .args(["-C", &input.dir, "remote", "get-url", "origin"])
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
+    let mut command = Command::new("git");
+    command.args(["-C", &input.dir, "remote", "get-url", "origin"]);
+    let get_url_output = run_command(&ctx, &mut command, "git remote get-url").await?;
 
     if !get_url_output.status.success() {
-        return Err(anyhow!("Failed to get remote URL").into());
+        return Err(command_error("git remote get-url", &get_url_output).into());
     }
 
     let current_url = String::from_utf8_lossy(&get_url_output.stdout)
@@ -273,25 +266,20 @@ pub async fn git_push(_ctx: ActivityContext, input: GitPushInput) -> Result<(), 
             .trim_start_matches("https://");
         let auth_url = format!("http://{git_username}:{git_password}@{url_without_protocol}");
 
-        let set_url_output = Command::new("git")
-            .args(["-C", &input.dir, "remote", "set-url", "origin", &auth_url])
-            .output()
-            .await
-            .map_err(|e| anyhow!(e))?;
+        let mut command = Command::new("git");
+        command.args(["-C", &input.dir, "remote", "set-url", "origin", &auth_url]);
+        let set_url_output = run_command(&ctx, &mut command, "git remote set-url").await?;
 
         if !set_url_output.status.success() {
-            let stderr = String::from_utf8_lossy(&set_url_output.stderr);
-            return Err(anyhow!("Failed to set remote URL: {}", stderr).into());
+            return Err(command_error("git remote set-url", &set_url_output).into());
         }
     }
 
-    let status = Command::new("git")
-        .args(["-C", &input.dir, "push"])
-        .status()
-        .await
-        .map_err(|e| anyhow!(e))?;
-    if !status.success() {
-        return Err(anyhow!("git push failed").into());
+    let mut command = Command::new("git");
+    command.args(["-C", &input.dir, "push"]);
+    let output = run_command(&ctx, &mut command, "git push").await?;
+    if !output.status.success() {
+        return Err(command_error("git push", &output).into());
     }
     Ok(())
 }

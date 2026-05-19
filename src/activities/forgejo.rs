@@ -1,3 +1,4 @@
+use super::process::{command_error, run_command};
 use anyhow::{Context, anyhow};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -15,11 +16,21 @@ pub struct ForgejoEnsureUserInput {
     pub email: String,
 }
 
-pub async fn forgejo_wait(_ctx: ActivityContext, forgejo_url: String) -> Result<(), ActivityError> {
+pub async fn forgejo_wait(ctx: ActivityContext, forgejo_url: String) -> Result<(), ActivityError> {
     for _ in 0..60 {
+        if ctx.is_cancelled() {
+            return Err(ActivityError::cancelled());
+        }
+        ctx.record_heartbeat(vec![]);
+
         match forgejo_request(Method::GET, &forgejo_url, "/api/healthz", None).await {
             Ok((StatusCode::OK, _)) => return Ok(()),
-            Ok(_) | Err(_) => sleep(Duration::from_secs(5)).await,
+            Ok(_) | Err(_) => {
+                tokio::select! {
+                    _ = sleep(Duration::from_secs(5)) => {}
+                    _ = ctx.cancelled() => return Err(ActivityError::cancelled()),
+                }
+            }
         }
     }
 
@@ -198,7 +209,7 @@ pub struct ForgejoEnsureGitopsRepoSeededInput {
 }
 
 pub async fn forgejo_ensure_gitops_repo_seeded(
-    _ctx: ActivityContext,
+    ctx: ActivityContext,
     input: ForgejoEnsureGitopsRepoSeededInput,
 ) -> Result<(), ActivityError> {
     ensure_forgejo_repo(&input.forgejo_url, &input.repo, false).await?;
@@ -208,18 +219,12 @@ pub async fn forgejo_ensure_gitops_repo_seeded(
         input.forgejo_url.trim_end_matches('/'),
         input.repo
     );
-    let output = authenticated_git_command()
-        .args(["ls-remote", &target_url, "HEAD"])
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
+    let mut command = authenticated_git_command();
+    command.args(["ls-remote", &target_url, "HEAD"]);
+    let output = run_command(&ctx, &mut command, "git ls-remote GitOps repo").await?;
 
     if !output.status.success() {
-        return Err(anyhow!(
-            "failed to inspect GitOps repo: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
+        return Err(command_error("git ls-remote GitOps repo", &output).into());
     }
 
     if !String::from_utf8_lossy(&output.stdout).trim().is_empty() {
@@ -234,38 +239,25 @@ pub async fn forgejo_ensure_gitops_repo_seeded(
         remove_dir_all(&workspace).await.map_err(|e| anyhow!(e))?;
     }
 
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(["clone", "--branch", &input.revision, &input.source_url])
-        .arg(&workspace)
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
+        .arg(&workspace);
+    let output = run_command(&ctx, &mut command, "git clone GitOps source repo").await?;
 
     if !output.status.success() {
-        return Err(anyhow!(
-            "failed to clone GitOps source repo: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
+        return Err(command_error("git clone GitOps source repo", &output).into());
     }
 
-    let output = authenticated_git_command()
-        .args([
-            "push",
-            &target_url,
-            &format!("HEAD:refs/heads/{}", input.revision),
-        ])
-        .current_dir(&workspace)
-        .output()
-        .await
-        .map_err(|e| anyhow!(e))?;
+    let branch_ref = format!("HEAD:refs/heads/{}", input.revision);
+    let mut command = authenticated_git_command();
+    command
+        .args(["push", &target_url, &branch_ref])
+        .current_dir(&workspace);
+    let output = run_command(&ctx, &mut command, "git push GitOps seed").await?;
 
     if !output.status.success() {
-        return Err(anyhow!(
-            "failed to seed GitOps repo: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
+        return Err(command_error("git push GitOps seed", &output).into());
     }
 
     Ok(())

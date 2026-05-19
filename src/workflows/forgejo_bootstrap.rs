@@ -9,6 +9,8 @@ use temporalio_macros::{workflow, workflow_methods};
 use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowContextView, WorkflowResult};
 use tracing::info;
 
+const COMMAND_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgejoBootstrapInput {
     pub forgejo_url: String,
@@ -75,7 +77,7 @@ impl ForgejoBootstrapWorkflow {
         ctx.start_activity(
             PlatformActivities::forgejo_wait,
             input.forgejo_url.clone(),
-            ActivityOptions::start_to_close_timeout(Duration::from_secs(300)),
+            command_activity_options(Duration::from_secs(300)),
         )
         .await?;
 
@@ -121,7 +123,7 @@ impl ForgejoBootstrapWorkflow {
                 source_url: input.gitops_source_url.clone(),
                 revision: input.gitops_revision.clone(),
             },
-            ActivityOptions::start_to_close_timeout(Duration::from_secs(600)),
+            command_activity_options(Duration::from_secs(600)),
         )
         .await?;
 
@@ -141,4 +143,10 @@ impl ForgejoBootstrapWorkflow {
 
         Ok(())
     }
+}
+
+fn command_activity_options(timeout: Duration) -> ActivityOptions {
+    ActivityOptions::with_start_to_close_timeout(timeout)
+        .heartbeat_timeout(COMMAND_HEARTBEAT_TIMEOUT)
+        .build()
 }
