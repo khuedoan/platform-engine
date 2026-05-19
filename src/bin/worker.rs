@@ -5,8 +5,7 @@ use std::{env, time::Duration};
 use temporalio_common::worker::WorkerDeploymentOptions;
 use temporalio_sdk::{Worker, WorkerOptions};
 use temporalio_sdk_core::{CoreRuntime, RuntimeOptions};
-use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -33,7 +32,7 @@ async fn main() -> Result<()> {
 
     let worker_options = match task_queue.as_str() {
         "bootstrap" => {
-            start_forgejo_bootstrap_loop(task_queue.clone());
+            sync_forgejo_bootstrap_schedule(&client, task_queue.clone()).await?;
             worker_options
                 .register_workflow::<workflows::forgejo_bootstrap::ForgejoBootstrapWorkflow>()
                 .build()
@@ -50,42 +49,33 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn start_forgejo_bootstrap_loop(task_queue: String) {
-    const WORKFLOW_ID: &str = "forgejo-bootstrap";
-
-    if env::var("FORGEJO_BOOTSTRAP")
-        .map(|value| value != "false")
-        .unwrap_or(false)
-    {
-        tokio::spawn(async move {
+async fn sync_forgejo_bootstrap_schedule(
+    client: &temporalio_client::Client,
+    task_queue: String,
+) -> Result<()> {
+    match env::var("FORGEJO_BOOTSTRAP").ok().as_deref() {
+        Some("false") => {
+            workflows::delete_forgejo_bootstrap_schedule(client).await?;
+            info!("disabled Forgejo bootstrap Temporal schedule");
+        }
+        Some(_) => {
             let interval = env::var("FORGEJO_BOOTSTRAP_INTERVAL_SECONDS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(1800);
+            let input = workflows::forgejo_bootstrap::ForgejoBootstrapInput::from_env();
 
-            loop {
-                let input = workflows::forgejo_bootstrap::ForgejoBootstrapInput::from_env();
-
-                match temporal::get_client().await {
-                    Ok(client) => {
-                        if let Err(err) = workflows::start_forgejo_bootstrap(
-                            &client,
-                            WORKFLOW_ID.to_string(),
-                            task_queue.clone(),
-                            input,
-                        )
-                        .await
-                        {
-                            error!(error = %err, "failed to start Forgejo bootstrap workflow");
-                        } else {
-                            info!("started Forgejo bootstrap workflow");
-                        }
-                    }
-                    Err(err) => error!(error = %err, "failed to connect to Temporal"),
-                }
-
-                sleep(Duration::from_secs(interval)).await;
-            }
-        });
+            workflows::ensure_forgejo_bootstrap_schedule(
+                client,
+                task_queue,
+                input,
+                Duration::from_secs(interval),
+            )
+            .await?;
+            info!("synced Forgejo bootstrap Temporal schedule");
+        }
+        None => {}
     }
+
+    Ok(())
 }
