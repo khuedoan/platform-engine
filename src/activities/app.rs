@@ -11,7 +11,7 @@ use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tokio::{fs::remove_dir_all, process::Command};
 use tracing::{info, warn};
 
-const BUILD_CACHE_TAG: &str = "buildcache";
+const BUILD_CACHE_TAG: &str = "buildcache-image";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishImageFromSourceInput {
@@ -331,7 +331,7 @@ mod tests {
 
         assert_eq!(
             docker_build_cache_ref(&image),
-            "registry.registry.svc.cluster.local/khuedoan/blog:buildcache"
+            "registry.registry.svc.cluster.local/khuedoan/blog:buildcache-image"
         );
     }
 }
