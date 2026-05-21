@@ -62,7 +62,7 @@ async fn sync_forgejo_bootstrap_schedule(
             let interval = env::var("FORGEJO_BOOTSTRAP_INTERVAL_SECONDS")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(1800);
+                .unwrap_or(86_400);
             let input = workflows::forgejo_bootstrap::ForgejoBootstrapInput::from_env();
 
             workflows::ensure_forgejo_bootstrap_schedule(
