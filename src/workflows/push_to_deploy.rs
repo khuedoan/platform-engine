@@ -3,6 +3,7 @@ use std::time::Duration;
 use super::options::command_activity_options;
 use crate::activities::*;
 use crate::core::app::{image::Image, source::Source};
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use temporalio_macros::{workflow, workflow_methods};
 use temporalio_sdk::{WorkflowContext, WorkflowContextView, WorkflowResult};
@@ -13,8 +14,6 @@ pub struct PushToDeployInput {
     pub source: Source,
     pub gitops_url: String,
     pub gitops_revision: String,
-    pub tenant: String,
-    pub project: String,
     pub environment: String,
     pub registry: String,
     #[serde(default)]
@@ -34,11 +33,17 @@ impl PushToDeployWorkflow {
     }
 
     #[run]
-    pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<Image> {
+    pub async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<Option<Image>> {
         let input = ctx.state(|state| state.input.clone());
         if !ctx.is_replaying() {
             info!("starting push to deploy: {input:?}");
         }
+
+        let (source_owner, source_repo_name) = match git_source_repo(&input.source) {
+            Some(source_repo) => source_repo,
+            None => return Err(anyhow!("push-to-deploy requires a Git source").into()),
+        };
+        let source_repo = format!("{source_owner}/{source_repo_name}");
 
         set_commit_status(
             ctx,
@@ -48,14 +53,54 @@ impl PushToDeployWorkflow {
         )
         .await;
 
+        let targets_result = ctx
+            .start_activity(
+                PlatformActivities::find_gitops_app_targets,
+                FindGitopsAppTargetsInput {
+                    url: input.gitops_url.clone(),
+                    revision: input.gitops_revision.clone(),
+                    registry: input.registry.clone(),
+                    source_repo: source_repo.clone(),
+                    environment: input.environment.clone(),
+                },
+                command_activity_options(Duration::from_secs(300)),
+            )
+            .await;
+        let targets = match targets_result {
+            Ok(targets) => targets,
+            Err(error) => {
+                set_commit_status(
+                    ctx,
+                    input.commit_status.clone(),
+                    "failure",
+                    "GitOps app target lookup failed",
+                )
+                .await;
+                return Err(error.into());
+            }
+        };
+        if targets.is_empty() {
+            set_commit_status(
+                ctx,
+                input.commit_status.clone(),
+                "success",
+                "No matching app environment",
+            )
+            .await;
+            if !ctx.is_replaying() {
+                info!(source_repo = %source_repo, environment = %input.environment, "no matching app environment");
+            }
+            return Ok(None);
+        }
+
         let image_result = ctx
             .start_activity(
                 PlatformActivities::publish_image_from_source,
                 PublishImageFromSourceInput {
                     source: input.source.clone(),
                     registry: input.registry.clone(),
-                    image_owner: input.tenant.clone(),
-                    image_repository: input.project.clone(),
+                    image_owner: format!("apps/{source_owner}"),
+                    image_repository: source_repo_name.clone(),
                 },
                 command_activity_options(Duration::from_secs(1200)),
             )
@@ -77,8 +122,7 @@ impl PushToDeployWorkflow {
         let update = UpdateGitopsImageInput {
             url: input.gitops_url.clone(),
             revision: input.gitops_revision.clone(),
-            tenant: input.tenant.clone(),
-            project: input.project.clone(),
+            source_repo,
             environment: input.environment.clone(),
             image: image.clone(),
             commit_status: input.commit_status.clone(),
@@ -117,7 +161,14 @@ impl PushToDeployWorkflow {
             info!("queued GitOps and apps OCI publish");
         }
 
-        Ok(image)
+        Ok(Some(image))
+    }
+}
+
+fn git_source_repo(source: &Source) -> Option<(String, String)> {
+    match source {
+        Source::Git { owner, name, .. } => Some((owner.clone(), name.clone())),
+        Source::Docker(_) => None,
     }
 }
 

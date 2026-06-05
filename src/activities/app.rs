@@ -342,14 +342,14 @@ mod tests {
     fn docker_build_cache_ref_uses_stable_app_tag() {
         let image = Image {
             registry: "registry.registry.svc.cluster.local".to_string(),
-            owner: "khuedoan".to_string(),
+            owner: "apps/khuedoan".to_string(),
             repository: "blog".to_string(),
             tag: "revision".to_string(),
         };
 
         assert_eq!(
             docker_build_cache_ref(&image),
-            "registry.registry.svc.cluster.local/khuedoan/blog:buildcache-image"
+            "registry.registry.svc.cluster.local/apps/khuedoan/blog:buildcache-image"
         );
     }
 }

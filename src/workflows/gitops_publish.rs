@@ -32,8 +32,7 @@ impl GitopsPublishWorkflow {
 
             if !ctx.is_replaying() {
                 info!(
-                    tenant = %input.tenant,
-                    project = %input.project,
+                    source_repo = %input.source_repo,
                     environment = %input.environment,
                     revision = %input.revision,
                     "publishing GitOps and apps OCI update"

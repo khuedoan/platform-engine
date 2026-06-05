@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -28,7 +28,6 @@ struct AppConfig {
     gitops_url: String,
     gitops_revision: String,
     registry: String,
-    repo_mappings: HashMap<String, AppTarget>,
     forgejo_url: Option<String>,
     temporal_web_url: Option<String>,
     temporal_namespace: String,
@@ -48,23 +47,12 @@ impl AppConfig {
             gitops_revision: std::env::var("GITOPS_REVISION")
                 .unwrap_or_else(|_| "master".to_string()),
             registry: std::env::var("REGISTRY").unwrap_or_else(|_| "localhost:5000".to_string()),
-            repo_mappings: std::env::var("NETAMOS_WEBHOOK_REPOS")
-                .ok()
-                .map(|spec| parse_repo_mappings(&spec))
-                .transpose()?
-                .unwrap_or_default(),
             forgejo_url: std::env::var("FORGEJO_URL").ok(),
             temporal_web_url: std::env::var("TEMPORAL_WEB_URL").ok(),
             temporal_namespace: std::env::var("TEMPORAL_NAMESPACE")
                 .unwrap_or_else(|_| "default".to_string()),
         })
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AppTarget {
-    tenant: String,
-    project: String,
 }
 
 #[derive(Deserialize)]
@@ -143,15 +131,6 @@ async fn handle_gitea_webhook(
             let url = payload.repository.clone_url;
             let workspace_path = format!("/tmp/{}-{}", sanitize(&repo_name), &revision);
             let source_repo = format!("{owner}/{repo_name}");
-            let target = state
-                .config
-                .repo_mappings
-                .get(&source_repo)
-                .cloned()
-                .unwrap_or(AppTarget {
-                    tenant: owner.clone(),
-                    project: repo_name.clone(),
-                });
 
             // Example JSON
             // {
@@ -197,8 +176,6 @@ async fn handle_gitea_webhook(
                     source,
                     gitops_url: state.config.gitops_url.clone(),
                     gitops_revision: state.config.gitops_revision.clone(),
-                    tenant: target.tenant,
-                    project: target.project,
                     environment,
                     registry: state.config.registry.clone(),
                     commit_status,
@@ -234,34 +211,6 @@ fn sanitize(input: &str) -> String {
     out.trim_matches('-').to_lowercase()
 }
 
-fn parse_repo_mappings(spec: &str) -> Result<HashMap<String, AppTarget>> {
-    let mut mappings = HashMap::new();
-    for entry in spec
-        .split(',')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-    {
-        let (source, target) = entry.split_once('=').unwrap_or((entry, entry));
-        let source = source.trim().to_string();
-        let (tenant, project) = split_repo_path(target.trim())?;
-        mappings.insert(
-            source,
-            AppTarget {
-                tenant: tenant.to_string(),
-                project: project.to_string(),
-            },
-        );
-    }
-
-    Ok(mappings)
-}
-
-fn split_repo_path(path: &str) -> Result<(&str, &str)> {
-    path.split_once('/')
-        .filter(|(owner, name)| !owner.is_empty() && !name.is_empty())
-        .context("repo mapping must use owner/name or owner/name=tenant/project")
-}
-
 fn app_environment(git_ref: &str, default_branch: &str) -> String {
     let branch = branch_name(git_ref);
     if !default_branch.is_empty() && branch == branch_name(default_branch) {
@@ -286,7 +235,7 @@ fn temporal_workflow_url(base_url: &str, namespace: &str, workflow_id: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{AppTarget, app_environment, parse_repo_mappings, temporal_workflow_url};
+    use super::{app_environment, temporal_workflow_url};
 
     #[test]
     fn app_environment_uses_production_for_default_branch() {
@@ -304,30 +253,6 @@ mod tests {
         assert_eq!(
             app_environment("refs/heads/feature/foo", "main"),
             "feature-foo"
-        );
-    }
-
-    #[test]
-    fn repo_mappings_default_to_source_repo() {
-        let mappings = parse_repo_mappings("khuedoan/blog").unwrap();
-        assert_eq!(
-            mappings.get("khuedoan/blog"),
-            Some(&AppTarget {
-                tenant: "khuedoan".to_string(),
-                project: "blog".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn repo_mappings_can_target_a_different_app() {
-        let mappings = parse_repo_mappings("khuedoan/example-service=test/example").unwrap();
-        assert_eq!(
-            mappings.get("khuedoan/example-service"),
-            Some(&AppTarget {
-                tenant: "test".to_string(),
-                project: "example".to_string(),
-            })
         );
     }
 

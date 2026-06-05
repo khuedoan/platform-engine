@@ -8,6 +8,7 @@ use crate::core::app::image::Image;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,13 +22,13 @@ const FLUX_NAMESPACE: &str = "flux-system";
 const SOURCE_INTERVAL: &str = "30s";
 const RECONCILE_INTERVAL: &str = "1m";
 const NAMESPACE_KIND: &str = "Namespace";
+const SOURCE_IMAGE_REPOSITORY: &str = "apps";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateGitopsImageInput {
     pub url: String,
     pub revision: String,
-    pub tenant: String,
-    pub project: String,
+    pub source_repo: String,
     pub environment: String,
     pub image: Image,
     #[serde(default)]
@@ -44,6 +45,35 @@ pub struct UpdateGitopsImageResult {
 pub struct EnqueueGitopsPublishInput {
     pub workflow_id: String,
     pub update: UpdateGitopsImageInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AppTarget {
+    pub tenant: String,
+    pub project: String,
+    pub environment: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AppSourceTarget {
+    source_repo: String,
+    target: AppTarget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindGitopsAppTargetsInput {
+    pub url: String,
+    pub revision: String,
+    pub registry: String,
+    pub source_repo: String,
+    pub environment: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindGitopsSourceReposInput {
+    pub url: String,
+    pub revision: String,
+    pub registry: String,
 }
 
 pub async fn enqueue_gitops_publish(
@@ -63,6 +93,44 @@ pub async fn enqueue_gitops_publish(
         .map_err(ActivityError::from)
 }
 
+pub async fn find_gitops_app_targets(
+    ctx: ActivityContext,
+    input: FindGitopsAppTargetsInput,
+) -> Result<Vec<AppTarget>, ActivityError> {
+    let workspace = TempWorkspace::new("gitops-targets", &input.url, &input.revision);
+    clone_repo(&ctx, &input.url, &input.revision, workspace.path()).await?;
+
+    let targets = scan_app_source_targets(&workspace.path().join("apps"), &input.registry)
+        .map_err(ActivityError::from)?
+        .into_iter()
+        .filter(|mapping| {
+            mapping.source_repo == input.source_repo
+                && mapping.target.environment == input.environment
+        })
+        .map(|mapping| mapping.target)
+        .collect();
+
+    Ok(targets)
+}
+
+pub async fn find_gitops_source_repos(
+    ctx: ActivityContext,
+    input: FindGitopsSourceReposInput,
+) -> Result<Vec<String>, ActivityError> {
+    let workspace = TempWorkspace::new("gitops-sources", &input.url, &input.revision);
+    clone_repo(&ctx, &input.url, &input.revision, workspace.path()).await?;
+
+    let repos = scan_app_source_targets(&workspace.path().join("apps"), &input.registry)
+        .map_err(ActivityError::from)?
+        .into_iter()
+        .map(|mapping| mapping.source_repo)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    Ok(repos)
+}
+
 pub async fn update_gitops_image(
     ctx: ActivityContext,
     input: UpdateGitopsImageInput,
@@ -78,8 +146,6 @@ pub async fn update_gitops_image(
     );
     let changed = update_app_version_inner(UpdateAppVersionInput {
         apps_dir: apps_dir.to_string_lossy().to_string(),
-        tenant: input.tenant.clone(),
-        project: input.project.clone(),
         environment: input.environment.clone(),
         new_images: vec![AppImageUpdate {
             repository,
@@ -114,19 +180,13 @@ async fn commit_and_push_gitops(
     workspace: &Path,
     input: &UpdateGitopsImageInput,
 ) -> Result<String, ActivityError> {
-    let app_path = Path::new("apps")
-        .join(&input.tenant)
-        .join(&input.project)
-        .join(&input.environment);
-    let app_path = app_path.to_string_lossy().to_string();
-
     let mut command = Command::new("git");
-    command.args(["add", &app_path]).current_dir(workspace);
+    command.args(["add", "apps"]).current_dir(workspace);
     run_checked_command(ctx, &mut command, "git add app version").await?;
 
     let commit_message = format!(
-        "chore({}/{}): update {} image",
-        input.tenant, input.project, input.environment
+        "chore(apps): update {} image for {}",
+        input.source_repo, input.environment
     );
     let mut command = Command::new("git");
     command
@@ -160,8 +220,12 @@ async fn clone_repo(
         remove_dir_all(workspace).await.map_err(|e| anyhow!(e))?;
     }
 
-    let git_username = env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
-    let git_password = env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
+    let git_username = env::var("GIT_USERNAME")
+        .or_else(|_| env::var("NETAMOS_USERNAME"))
+        .unwrap_or_else(|_| "git".to_string());
+    let git_password = env::var("GIT_PASSWORD")
+        .or_else(|_| env::var("NETAMOS_PASSWORD"))
+        .unwrap_or_else(|_| "password".to_string());
     let mut command = git_command_for_url(url, &git_username, &git_password);
     command
         .args(["clone", "--branch", revision, url])
@@ -198,34 +262,36 @@ pub struct AppImageUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateAppVersionInput {
     pub apps_dir: String,
-    pub tenant: String,
-    pub project: String,
     pub environment: String,
     pub new_images: Vec<AppImageUpdate>,
 }
 
 pub async fn update_app_version_inner(input: UpdateAppVersionInput) -> anyhow::Result<bool> {
-    let app_dir = Path::new(&input.apps_dir)
-        .join(&input.tenant)
-        .join(&input.project)
-        .join(&input.environment);
+    let apps_dir = Path::new(&input.apps_dir);
     let mut changed = false;
 
-    for entry in fs::read_dir(&app_dir)? {
-        let path = entry?.path();
-        if !is_yaml_file(&path) {
-            continue;
-        }
+    for (_tenant, tenant_dir) in child_dirs(apps_dir)? {
+        for (_project, project_dir) in child_dirs(&tenant_dir)? {
+            let app_dir = project_dir.join(&input.environment);
+            if !app_dir.is_dir() {
+                continue;
+            }
 
-        let mut doc: YamlValue = serde_yaml::from_reader(fs::File::open(&path)?)?;
-        let mut file_changed = false;
-        update_image_tags_recursive(&mut doc, &input.new_images, &mut file_changed);
+            for entry in fs::read_dir(&app_dir)? {
+                let path = entry?.path();
+                if !is_yaml_file(&path) || is_kustomization(&path) {
+                    continue;
+                }
 
-        if file_changed {
-            let writer = fs::File::create(&path)?;
-            let mut ser = serde_yaml::Serializer::new(writer);
-            doc.serialize(&mut ser)?;
-            changed = true;
+                let mut doc = read_app_manifest(&path)?;
+                let mut file_changed = false;
+                update_image_tags_recursive(&mut doc, &input.new_images, &mut file_changed);
+
+                if file_changed {
+                    write_yaml_manifest(&path, &doc)?;
+                    changed = true;
+                }
+            }
         }
     }
 
@@ -347,6 +413,44 @@ fn copy_app_manifests(
     Ok(count)
 }
 
+fn scan_app_source_targets(
+    apps_dir: &Path,
+    registry: &str,
+) -> anyhow::Result<Vec<AppSourceTarget>> {
+    let mut mappings = BTreeSet::new();
+
+    for (tenant, tenant_dir) in child_dirs(apps_dir)? {
+        for (project, project_dir) in child_dirs(&tenant_dir)? {
+            for (environment, environment_dir) in child_dirs(&project_dir)? {
+                for entry in fs::read_dir(&environment_dir)? {
+                    let path = entry?.path();
+                    if !is_yaml_file(&path) || is_kustomization(&path) {
+                        continue;
+                    }
+
+                    let manifest = read_app_manifest(&path)?;
+                    let mut image_refs = Vec::new();
+                    collect_image_references(&manifest, &mut image_refs);
+                    for image in image_refs {
+                        if let Some(source_repo) = source_repo_from_image(registry, image) {
+                            mappings.insert(AppSourceTarget {
+                                source_repo,
+                                target: AppTarget {
+                                    tenant: tenant.clone(),
+                                    project: project.clone(),
+                                    environment: environment.clone(),
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(mappings.into_iter().collect())
+}
+
 fn read_app_manifest(path: &Path) -> anyhow::Result<YamlValue> {
     let mut manifest = None;
     for document in serde_yaml::Deserializer::from_reader(fs::File::open(path)?) {
@@ -404,6 +508,53 @@ fn validate_app_manifest(path: &Path, manifest: &YamlValue) -> anyhow::Result<()
     }
 
     Ok(())
+}
+
+fn collect_image_references<'a>(node: &'a YamlValue, images: &mut Vec<&'a str>) {
+    match node {
+        YamlValue::Mapping(map) => {
+            let image_key = YamlValue::String("image".to_string());
+            if let Some(YamlValue::String(image)) = map.get(&image_key) {
+                images.push(image);
+            }
+
+            for value in map.values() {
+                collect_image_references(value, images);
+            }
+        }
+        YamlValue::Sequence(seq) => {
+            for value in seq {
+                collect_image_references(value, images);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn source_repo_from_image(registry: &str, image: &str) -> Option<String> {
+    let prefix = format!(
+        "{}/{SOURCE_IMAGE_REPOSITORY}/",
+        registry.trim_end_matches('/')
+    );
+    let image = image.strip_prefix(&prefix)?;
+    let repository = image_repository_path(image);
+    let mut parts = repository.split('/');
+    let owner = parts.next().filter(|part| !part.is_empty())?;
+    let repo = parts.next().filter(|part| !part.is_empty())?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    Some(format!("{owner}/{repo}"))
+}
+
+fn image_repository_path(image: &str) -> &str {
+    let image = image
+        .split_once('@')
+        .map_or(image, |(repository, _digest)| repository);
+    image
+        .split_once(':')
+        .map_or(image, |(repository, _tag)| repository)
 }
 
 fn is_empty_yaml_document(value: &YamlValue) -> bool {
@@ -714,15 +865,16 @@ metadata:
         let tmp = PathBuf::from("/tmp/test-cloudlab-apps-1");
         let _ = tokio::fs::remove_dir_all(&tmp).await;
         tokio::fs::create_dir_all(&tmp).await.unwrap();
-        write_app_fixture(&tmp, "docker.io/khuedoan/blog:old-tag");
+        write_app_fixture(
+            &tmp,
+            "registry.registry.svc.cluster.local/apps/khuedoan/blog:old-tag",
+        );
 
         let changed = update_app_version_inner(UpdateAppVersionInput {
             apps_dir: tmp.to_string_lossy().to_string(),
-            tenant: "khuedoan".to_string(),
-            project: "blog".to_string(),
             environment: "production".to_string(),
             new_images: vec![AppImageUpdate {
-                repository: "docker.io/khuedoan/blog".to_string(),
+                repository: "registry.registry.svc.cluster.local/apps/khuedoan/blog".to_string(),
                 tag: "test-tag-123".to_string(),
             }],
         })
@@ -732,7 +884,9 @@ metadata:
         assert!(changed);
         let deployment =
             fs::read_to_string(tmp.join("khuedoan/blog/production/deployment-blog.yaml")).unwrap();
-        assert!(deployment.contains("image: docker.io/khuedoan/blog:test-tag-123"));
+        assert!(deployment.contains(
+            "image: registry.registry.svc.cluster.local/apps/khuedoan/blog:test-tag-123"
+        ));
     }
 
     #[tokio::test]
@@ -742,16 +896,14 @@ metadata:
         tokio::fs::create_dir_all(&tmp).await.unwrap();
         write_app_fixture(
             &tmp,
-            "docker.io/khuedoan/blog:6fbd90b77a81e0bcb330fddaa230feff744a7010",
+            "registry.registry.svc.cluster.local/apps/khuedoan/blog:6fbd90b77a81e0bcb330fddaa230feff744a7010",
         );
 
         let changed = update_app_version_inner(UpdateAppVersionInput {
             apps_dir: tmp.to_string_lossy().to_string(),
-            tenant: "khuedoan".to_string(),
-            project: "blog".to_string(),
             environment: "production".to_string(),
             new_images: vec![AppImageUpdate {
-                repository: "docker.io/khuedoan/blog".to_string(),
+                repository: "registry.registry.svc.cluster.local/apps/khuedoan/blog".to_string(),
                 tag: "6fbd90b77a81e0bcb330fddaa230feff744a7010".to_string(),
             }],
         })
@@ -759,6 +911,90 @@ metadata:
         .unwrap();
 
         assert!(!changed);
+    }
+
+    #[test]
+    fn test_source_repo_from_image() {
+        let registry = "registry.registry.svc.cluster.local";
+
+        assert_eq!(
+            source_repo_from_image(
+                registry,
+                "registry.registry.svc.cluster.local/apps/khuedoan/blog:abc123"
+            ),
+            Some("khuedoan/blog".to_string())
+        );
+        assert_eq!(
+            source_repo_from_image(
+                registry,
+                "registry.registry.svc.cluster.local/apps/khuedoan/blog@sha256:abc123"
+            ),
+            Some("khuedoan/blog".to_string())
+        );
+        assert_eq!(
+            source_repo_from_image(
+                registry,
+                "registry.registry.svc.cluster.local/vendor/blog:1"
+            ),
+            None
+        );
+        assert_eq!(
+            source_repo_from_image(
+                registry,
+                "registry.registry.svc.cluster.local/apps/khuedoan/team/blog:1"
+            ),
+            None
+        );
+        assert_eq!(
+            source_repo_from_image(registry, "ghcr.io/khuedoan/blog:1"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_scan_app_source_targets_allows_multiple_sources() {
+        let source = PathBuf::from("/tmp/test-cloudlab-app-source-targets");
+        let _ = fs::remove_dir_all(&source);
+        let app_dir = source.join("khuedoan").join("blog").join("production");
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(
+            app_dir.join("deployment-blog.yaml"),
+            r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blog
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          image: registry.registry.svc.cluster.local/apps/khuedoan/api:old
+        - name: worker
+          image: registry.registry.svc.cluster.local/apps/khuedoan/worker:old
+        - name: sidecar
+          image: ghcr.io/example/sidecar:1
+"#,
+        )
+        .unwrap();
+
+        let mappings =
+            scan_app_source_targets(&source, "registry.registry.svc.cluster.local").unwrap();
+
+        assert_eq!(mappings.len(), 2);
+        assert!(mappings.iter().any(|mapping| {
+            mapping.source_repo == "khuedoan/api"
+                && mapping.target
+                    == AppTarget {
+                        tenant: "khuedoan".to_string(),
+                        project: "blog".to_string(),
+                        environment: "production".to_string(),
+                    }
+        }));
+        assert!(
+            mappings
+                .iter()
+                .any(|mapping| mapping.source_repo == "khuedoan/worker")
+        );
     }
 
     #[test]

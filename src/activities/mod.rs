@@ -43,6 +43,22 @@ impl PlatformActivities {
     }
 
     #[activity]
+    pub async fn find_gitops_app_targets(
+        ctx: ActivityContext,
+        input: FindGitopsAppTargetsInput,
+    ) -> Result<Vec<AppTarget>, ActivityError> {
+        find_gitops_app_targets(ctx, input).await
+    }
+
+    #[activity]
+    pub async fn find_gitops_source_repos(
+        ctx: ActivityContext,
+        input: FindGitopsSourceReposInput,
+    ) -> Result<Vec<String>, ActivityError> {
+        find_gitops_source_repos(ctx, input).await
+    }
+
+    #[activity]
     pub async fn forgejo_wait(
         ctx: ActivityContext,
         forgejo_url: String,
