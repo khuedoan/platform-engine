@@ -36,6 +36,14 @@ impl PlatformActivities {
     }
 
     #[activity]
+    pub async fn create_gitops_app(
+        ctx: ActivityContext,
+        input: CreateGitopsAppInput,
+    ) -> Result<CreateGitopsAppResult, ActivityError> {
+        create_gitops_app(ctx, input).await
+    }
+
+    #[activity]
     pub async fn enqueue_gitops_publish(
         ctx: ActivityContext,
         input: EnqueueGitopsPublishInput,

@@ -4,9 +4,16 @@ use super::{
     process::{run_checked_command, run_stdout_command},
     workspace::TempWorkspace,
 };
-use crate::core::app::image::Image;
-use anyhow::anyhow;
+use crate::{
+    api::{
+        CreateAppRequest, CreateDeployment, CreateHttpRoute, CreatePostgres, CreateService,
+        CreateVolume, KeyValue,
+    },
+    core::app::image::Image,
+};
+use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value as JsonValue, json};
 use serde_yaml::Value as YamlValue;
 use std::collections::BTreeSet;
 use std::env;
@@ -74,6 +81,32 @@ pub struct FindGitopsSourceReposInput {
     pub url: String,
     pub revision: String,
     pub registry: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateGitopsAppInput {
+    pub url: String,
+    pub revision: String,
+    pub registry: String,
+    pub request: CreateAppRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateGitopsAppResult {
+    pub changed: bool,
+    pub commit_sha: Option<String>,
+    pub app_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppInventory {
+    pub tenant: String,
+    pub project: String,
+    pub environment: String,
+    pub resources: Vec<String>,
+    pub hostnames: Vec<String>,
+    pub images: Vec<String>,
+    pub source_repos: Vec<String>,
 }
 
 pub async fn enqueue_gitops_publish(
@@ -156,7 +189,20 @@ pub async fn update_gitops_image(
 
     let mut commit_sha = None;
     if changed {
-        commit_sha = Some(commit_and_push_gitops(&ctx, workspace.path(), &input).await?);
+        let commit_message = format!(
+            "chore(apps): update {} image for {}",
+            input.source_repo, input.environment
+        );
+        commit_sha = Some(
+            commit_and_push_gitops(
+                &ctx,
+                workspace.path(),
+                &input.url,
+                &input.revision,
+                &commit_message,
+            )
+            .await?,
+        );
     }
 
     let bundle_workspace = TempWorkspace::new("apps-bundle", &input.url, &input.revision);
@@ -175,22 +221,91 @@ pub async fn update_gitops_image(
     })
 }
 
+pub async fn create_gitops_app(
+    ctx: ActivityContext,
+    input: CreateGitopsAppInput,
+) -> Result<CreateGitopsAppResult, ActivityError> {
+    if ctx.is_cancelled() {
+        return Err(ActivityError::cancelled());
+    }
+
+    input
+        .request
+        .validate()
+        .map_err(|error| ActivityError::from(anyhow!(error)))?;
+
+    let workspace = TempWorkspace::new("create-app", &input.url, &input.revision);
+    clone_repo(&ctx, &input.url, &input.revision, workspace.path()).await?;
+    configure_git_user(&ctx, workspace.path()).await?;
+
+    let app_path = input.request.app_path();
+    let apps_dir = workspace.path().join("apps");
+    let app_dir = apps_dir
+        .join(&input.request.tenant)
+        .join(&input.request.project)
+        .join(&input.request.environment);
+
+    if app_dir.exists() {
+        if !input.request.force {
+            return Err(ActivityError::from(anyhow!(
+                "apps/{app_path} already exists; pass force to replace it"
+            )));
+        }
+        fs::remove_dir_all(&app_dir).map_err(|error| ActivityError::from(anyhow!(error)))?;
+    }
+    fs::create_dir_all(&app_dir).map_err(|error| ActivityError::from(anyhow!(error)))?;
+    write_create_app_manifests(&app_dir, &input.request, &input.registry)
+        .map_err(ActivityError::from)?;
+
+    let pathspec = format!("apps/{app_path}");
+    let changed = git_has_changes(&ctx, workspace.path(), &pathspec).await?;
+    let commit_sha = if changed {
+        let commit_message = format!("feat(apps): create {app_path}");
+        Some(
+            commit_and_push_gitops(
+                &ctx,
+                workspace.path(),
+                &input.url,
+                &input.revision,
+                &commit_message,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let bundle_workspace = TempWorkspace::new("apps-bundle", &input.url, &input.revision);
+    let bundle = write_apps_bundle(
+        bundle_workspace.path(),
+        &apps_dir,
+        APPS_REPOSITORY,
+        APPS_TAG,
+        &input.registry,
+    )?;
+    push_apps_bundle(&ctx, &input.registry, &bundle).await?;
+
+    Ok(CreateGitopsAppResult {
+        changed,
+        commit_sha,
+        app_path,
+    })
+}
+
 async fn commit_and_push_gitops(
     ctx: &ActivityContext,
     workspace: &Path,
-    input: &UpdateGitopsImageInput,
+    url: &str,
+    revision: &str,
+    commit_message: &str,
 ) -> Result<String, ActivityError> {
     let mut command = Command::new("git");
     command.args(["add", "apps"]).current_dir(workspace);
     run_checked_command(ctx, &mut command, "git add app version").await?;
 
-    let commit_message = format!(
-        "chore(apps): update {} image for {}",
-        input.source_repo, input.environment
-    );
     let mut command = Command::new("git");
     command
-        .args(["commit", "-m", &commit_message])
+        .args(["commit", "-m", commit_message])
         .current_dir(workspace);
     run_checked_command(ctx, &mut command, "git commit app version").await?;
 
@@ -200,14 +315,27 @@ async fn commit_and_push_gitops(
 
     let git_username = env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
     let git_password = env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
-    let mut command = git_command_for_url(&input.url, &git_username, &git_password);
-    let branch_ref = format!("HEAD:{}", input.revision);
+    let mut command = git_command_for_url(url, &git_username, &git_password);
+    let branch_ref = format!("HEAD:{revision}");
     command
         .args(["push", "origin", &branch_ref])
         .current_dir(workspace);
     run_checked_command(ctx, &mut command, "git push app version").await?;
 
     Ok(commit_sha)
+}
+
+async fn git_has_changes(
+    ctx: &ActivityContext,
+    workspace: &Path,
+    pathspec: &str,
+) -> Result<bool, ActivityError> {
+    let mut command = Command::new("git");
+    command
+        .args(["status", "--porcelain", "--", pathspec])
+        .current_dir(workspace);
+    let status = run_stdout_command(ctx, &mut command, "git status app").await?;
+    Ok(!status.trim().is_empty())
 }
 
 async fn clone_repo(
@@ -555,6 +683,337 @@ fn image_repository_path(image: &str) -> &str {
     image
         .split_once(':')
         .map_or(image, |(repository, _tag)| repository)
+}
+
+pub fn scan_app_inventory(apps_dir: &Path, registry: &str) -> anyhow::Result<Vec<AppInventory>> {
+    let mut inventory = Vec::new();
+
+    for (tenant, tenant_dir) in child_dirs(apps_dir)? {
+        for (project, project_dir) in child_dirs(&tenant_dir)? {
+            for (environment, environment_dir) in child_dirs(&project_dir)? {
+                let mut resources = BTreeSet::new();
+                let mut hostnames = BTreeSet::new();
+                let mut images = BTreeSet::new();
+                let mut source_repos = BTreeSet::new();
+
+                for entry in fs::read_dir(&environment_dir)? {
+                    let path = entry?.path();
+                    if !is_yaml_file(&path) || is_kustomization(&path) {
+                        continue;
+                    }
+
+                    let manifest = read_app_manifest(&path)?;
+                    if let Some(resource) = resource_ref(&manifest) {
+                        resources.insert(resource);
+                    }
+                    for hostname in http_route_hostnames(&manifest) {
+                        hostnames.insert(hostname);
+                    }
+
+                    let mut image_refs = Vec::new();
+                    collect_image_references(&manifest, &mut image_refs);
+                    for image in image_refs {
+                        images.insert(image.to_string());
+                        if let Some(source_repo) = source_repo_from_image(registry, image) {
+                            source_repos.insert(source_repo);
+                        }
+                    }
+                }
+
+                if !resources.is_empty() {
+                    inventory.push(AppInventory {
+                        tenant: tenant.clone(),
+                        project: project.clone(),
+                        environment: environment.clone(),
+                        resources: resources.into_iter().collect(),
+                        hostnames: hostnames.into_iter().collect(),
+                        images: images.into_iter().collect(),
+                        source_repos: source_repos.into_iter().collect(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(inventory)
+}
+
+fn resource_ref(manifest: &YamlValue) -> Option<String> {
+    let YamlValue::Mapping(root) = manifest else {
+        return None;
+    };
+    let kind = required_string(root, "kind")?;
+    let metadata = required_mapping(root, "metadata")?;
+    let name = required_string(metadata, "name")?;
+    Some(format!("{kind}/{name}"))
+}
+
+fn http_route_hostnames(manifest: &YamlValue) -> Vec<String> {
+    let YamlValue::Mapping(root) = manifest else {
+        return Vec::new();
+    };
+    if required_string(root, "kind") != Some("HTTPRoute") {
+        return Vec::new();
+    }
+
+    let Some(spec) = required_mapping(root, "spec") else {
+        return Vec::new();
+    };
+    match spec.get(&YamlValue::String("hostnames".to_string())) {
+        Some(YamlValue::Sequence(hostnames)) => hostnames
+            .iter()
+            .filter_map(|value| match value {
+                YamlValue::String(hostname) => Some(hostname.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn write_create_app_manifests(
+    app_dir: &Path,
+    request: &CreateAppRequest,
+    registry: &str,
+) -> anyhow::Result<usize> {
+    let mut count = 0;
+
+    if let Some(deployment) = &request.deployment {
+        write_json_manifest(
+            &app_dir.join(format!("deployment-{}.yaml", request.project)),
+            deployment_manifest(request, deployment, registry)?,
+        )?;
+        count += 1;
+    }
+    if let Some(service) = &request.service {
+        write_json_manifest(
+            &app_dir.join(format!("service-{}.yaml", request.project)),
+            service_manifest(request, service),
+        )?;
+        count += 1;
+    }
+    if let Some(route) = &request.http_route {
+        write_json_manifest(
+            &app_dir.join(format!("httproute-{}.yaml", request.project)),
+            http_route_manifest(request, route),
+        )?;
+        count += 1;
+    }
+    if !request.config.is_empty() {
+        write_json_manifest(
+            &app_dir.join(format!("configmap-{}.yaml", request.project)),
+            config_map_manifest(request, &request.config),
+        )?;
+        count += 1;
+    }
+    if !request.secrets.is_empty() {
+        write_json_manifest(
+            &app_dir.join(format!("secret-{}.yaml", request.project)),
+            secret_manifest(request, &request.secrets),
+        )?;
+        count += 1;
+    }
+    for volume in &request.volumes {
+        write_json_manifest(
+            &app_dir.join(format!("persistentvolumeclaim-{}.yaml", volume.name)),
+            pvc_manifest(volume),
+        )?;
+        count += 1;
+    }
+    if let Some(postgres) = &request.postgres {
+        write_json_manifest(
+            &app_dir.join(format!("cluster-{}-postgres.yaml", request.project)),
+            postgres_manifest(request, postgres),
+        )?;
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+fn deployment_manifest(
+    request: &CreateAppRequest,
+    deployment: &CreateDeployment,
+    registry: &str,
+) -> anyhow::Result<JsonValue> {
+    let image = deployment
+        .image
+        .clone()
+        .or_else(|| {
+            deployment
+                .source_repo
+                .as_ref()
+                .map(|repo| format!("{}/apps/{repo}:latest", registry.trim_end_matches('/')))
+        })
+        .context("deployment needs either an image or a source repo")?;
+    let label = json!({ "app.kubernetes.io/name": &request.project });
+    let mut container = json!({
+        "name": &request.project,
+        "image": image,
+    });
+    if let Some(port) = deployment.port {
+        container["ports"] = json!([{ "containerPort": port, "name": "http" }]);
+    }
+    if !request.config.is_empty() || !request.secrets.is_empty() {
+        let mut env_from = Vec::new();
+        if !request.config.is_empty() {
+            env_from.push(json!({ "configMapRef": { "name": &request.project } }));
+        }
+        if !request.secrets.is_empty() {
+            env_from.push(json!({ "secretRef": { "name": &request.project } }));
+        }
+        container["envFrom"] = json!(env_from);
+    }
+    if !request.volumes.is_empty() {
+        container["volumeMounts"] = json!(
+            request
+                .volumes
+                .iter()
+                .map(|volume| json!({ "name": &volume.name, "mountPath": &volume.mount_path }))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    let mut manifest = json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": { "name": &request.project },
+        "spec": {
+            "replicas": deployment.replicas,
+            "selector": { "matchLabels": label },
+            "template": {
+                "metadata": {
+                    "labels": {
+                        "app.kubernetes.io/name": &request.project,
+                        "istio.io/dataplane-mode": "ambient",
+                    },
+                },
+                "spec": { "containers": [container] },
+            },
+        },
+    });
+    if !request.volumes.is_empty() {
+        manifest["spec"]["template"]["spec"]["volumes"] = json!(
+            request
+                .volumes
+                .iter()
+                .map(|volume| json!({
+                    "name": &volume.name,
+                    "persistentVolumeClaim": { "claimName": &volume.name },
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    Ok(manifest)
+}
+
+fn service_manifest(request: &CreateAppRequest, service: &CreateService) -> JsonValue {
+    json!({
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": { "name": &request.project },
+        "spec": {
+            "ports": [{
+                "name": "http",
+                "port": service.port,
+                "targetPort": "http",
+            }],
+            "selector": { "app.kubernetes.io/name": &request.project },
+        },
+    })
+}
+
+fn http_route_manifest(request: &CreateAppRequest, route: &CreateHttpRoute) -> JsonValue {
+    json!({
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "metadata": { "name": &request.project },
+        "spec": {
+            "hostnames": [&route.hostname],
+            "parentRefs": [{
+                "group": "gateway.networking.k8s.io",
+                "kind": "Gateway",
+                "name": "gateway",
+                "namespace": "istio-system",
+            }],
+            "rules": [{
+                "backendRefs": [{ "name": &request.project, "port": route.port }],
+                "matches": [{ "path": { "type": "PathPrefix", "value": "/" } }],
+            }],
+        },
+    })
+}
+
+fn config_map_manifest(request: &CreateAppRequest, values: &[KeyValue]) -> JsonValue {
+    json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": { "name": &request.project },
+        "data": key_values(values),
+    })
+}
+
+fn secret_manifest(request: &CreateAppRequest, values: &[KeyValue]) -> JsonValue {
+    json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": &request.project,
+            "annotations": {
+                "vault.security.banzaicloud.io/vault-addr": "http://vault.vault.svc.cluster.local:8200",
+                "vault.security.banzaicloud.io/vault-path": "kubernetes",
+                "vault.security.banzaicloud.io/vault-role": "default",
+            },
+        },
+        "type": "Opaque",
+        "stringData": key_values(values),
+    })
+}
+
+fn pvc_manifest(volume: &CreateVolume) -> JsonValue {
+    json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": { "name": &volume.name },
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "resources": { "requests": { "storage": &volume.size } },
+        },
+    })
+}
+
+fn postgres_manifest(request: &CreateAppRequest, postgres: &CreatePostgres) -> JsonValue {
+    let cluster = format!("{}-postgres", request.project);
+    json!({
+        "apiVersion": "postgresql.cnpg.io/v1",
+        "kind": "Cluster",
+        "metadata": { "name": &cluster },
+        "spec": {
+            "instances": 1,
+            "bootstrap": {
+                "initdb": {
+                    "database": &request.project,
+                    "owner": &request.project,
+                    "secret": { "name": format!("{cluster}-app") },
+                },
+            },
+            "storage": { "size": &postgres.size },
+        },
+    })
+}
+
+fn key_values(values: &[KeyValue]) -> serde_json::Map<String, JsonValue> {
+    values
+        .iter()
+        .map(|value| (value.key.clone(), JsonValue::String(value.value.clone())))
+        .collect()
+}
+
+fn write_json_manifest(path: &Path, value: JsonValue) -> anyhow::Result<()> {
+    let manifest = serde_yaml::to_value(value)?;
+    validate_app_manifest(path, &manifest)?;
+    write_yaml_manifest(path, &manifest)
 }
 
 fn is_empty_yaml_document(value: &YamlValue) -> bool {
@@ -1118,5 +1577,73 @@ metadata:
                 "{name}: expected {want_error:?}, got {error}"
             );
         }
+    }
+
+    #[test]
+    fn test_write_create_app_manifests_and_scan_inventory() {
+        let output = PathBuf::from("/tmp/test-cloudlab-create-app-manifests");
+        let _ = fs::remove_dir_all(&output);
+        fs::create_dir_all(&output).unwrap();
+
+        let request = CreateAppRequest {
+            tenant: "test".to_string(),
+            project: "example".to_string(),
+            environment: "staging".to_string(),
+            force: false,
+            deployment: Some(CreateDeployment {
+                image: None,
+                source_repo: Some("khuedoan/example-service".to_string()),
+                replicas: 1,
+                port: Some(3000),
+            }),
+            service: Some(CreateService { port: 3000 }),
+            http_route: Some(CreateHttpRoute {
+                hostname: "example.staging.khuedoan.com".to_string(),
+                port: 3000,
+            }),
+            config: vec![KeyValue {
+                key: "GREETING".to_string(),
+                value: "hello".to_string(),
+            }],
+            secrets: vec![KeyValue {
+                key: "TOKEN".to_string(),
+                value: "vault:secret/data/example#token".to_string(),
+            }],
+            volumes: vec![CreateVolume {
+                name: "data".to_string(),
+                size: "1Gi".to_string(),
+                mount_path: "/data".to_string(),
+            }],
+            postgres: None,
+        };
+
+        let app_dir = output.join("test/example/staging");
+        fs::create_dir_all(&app_dir).unwrap();
+        let count =
+            write_create_app_manifests(&app_dir, &request, "registry.registry.svc.cluster.local")
+                .unwrap();
+
+        assert_eq!(count, 6);
+        let deployment = fs::read_to_string(app_dir.join("deployment-example.yaml")).unwrap();
+        assert!(deployment.contains(
+            "image: registry.registry.svc.cluster.local/apps/khuedoan/example-service:latest"
+        ));
+        assert!(!deployment.contains("namespace:"));
+
+        let inventory = scan_app_inventory(&output, "registry.registry.svc.cluster.local").unwrap();
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].tenant, "test");
+        assert_eq!(inventory[0].project, "example");
+        assert_eq!(inventory[0].environment, "staging");
+        assert!(
+            inventory[0]
+                .hostnames
+                .contains(&"example.staging.khuedoan.com".to_string())
+        );
+        assert!(
+            inventory[0]
+                .source_repos
+                .contains(&"khuedoan/example-service".to_string())
+        );
     }
 }

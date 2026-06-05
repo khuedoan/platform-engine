@@ -1,6 +1,10 @@
 use crate::{
     activities::UpdateGitopsImageInput,
-    workflows::{forgejo_bootstrap::ForgejoBootstrapInput, push_to_deploy::PushToDeployInput},
+    api::WorkflowStatus,
+    workflows::{
+        create_app::CreateAppInput, forgejo_bootstrap::ForgejoBootstrapInput,
+        push_to_deploy::PushToDeployInput,
+    },
 };
 use anyhow::{Context, Result, ensure};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,13 +23,15 @@ use temporalio_common::{
             taskqueue::v1 as taskqueue_proto,
             workflow::v1 as workflow_proto,
             workflowservice::v1::{
-                CreateScheduleRequest, DeleteScheduleRequest, UpdateScheduleRequest,
+                CreateScheduleRequest, DeleteScheduleRequest, DescribeWorkflowExecutionRequest,
+                UpdateScheduleRequest,
             },
         },
     },
 };
 use tracing::{error, info, warn};
 
+pub mod create_app;
 pub mod forgejo_bootstrap;
 pub mod gitops_publish;
 mod options;
@@ -46,6 +52,55 @@ pub async fn start_workflow(client: &Client, id: String, input: PushToDeployInpu
         .await;
 
     handle_start_result(result.map(|_| ()))
+}
+
+pub async fn start_create_app_workflow(
+    client: &Client,
+    id: String,
+    input: CreateAppInput,
+) -> Result<()> {
+    let result = client
+        .start_workflow(
+            create_app::CreateAppWorkflow::run,
+            input,
+            WorkflowStartOptions::new("main", id).build(),
+        )
+        .await;
+
+    handle_start_result(result.map(|_| ()))
+}
+
+pub async fn describe_workflow(
+    client: &Client,
+    workflow_id: String,
+    url: Option<String>,
+) -> Result<WorkflowStatus> {
+    let response = WorkflowService::describe_workflow_execution(
+        &mut client.clone(),
+        DescribeWorkflowExecutionRequest {
+            namespace: client.namespace(),
+            execution: Some(common_proto::WorkflowExecution {
+                workflow_id: workflow_id.clone(),
+                run_id: String::new(),
+            }),
+        }
+        .into_request(),
+    )
+    .await
+    .context("failed to describe Temporal workflow")?
+    .into_inner();
+
+    let info = response
+        .workflow_execution_info
+        .context("Temporal response did not include workflow execution info")?;
+
+    Ok(WorkflowStatus {
+        workflow_id,
+        status: workflow_status(info.status).to_string(),
+        url,
+        result: None,
+        error: None,
+    })
 }
 
 pub async fn signal_gitops_publish(
@@ -75,6 +130,19 @@ pub async fn signal_gitops_publish(
         .await;
 
     handle_start_result(result.map(|_| ()))
+}
+
+fn workflow_status(status: i32) -> &'static str {
+    match status {
+        1 => "running",
+        2 => "completed",
+        3 => "failed",
+        4 => "canceled",
+        5 => "terminated",
+        6 => "continued_as_new",
+        7 => "timed_out",
+        _ => "unknown",
+    }
 }
 
 pub async fn start_forgejo_bootstrap(
