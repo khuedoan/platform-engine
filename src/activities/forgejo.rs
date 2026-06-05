@@ -175,6 +175,127 @@ pub async fn forgejo_ensure_webhook(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgejoEnsureSystemWebhookInput {
+    pub forgejo_url: String,
+    pub webhook_url: String,
+    pub legacy_webhook_url: String,
+}
+
+pub async fn forgejo_ensure_system_webhook(
+    _ctx: ActivityContext,
+    input: ForgejoEnsureSystemWebhookInput,
+) -> Result<(), ActivityError> {
+    let path = "/api/v1/admin/hooks?type=system";
+    let hooks = expect_forgejo_json(Method::GET, &input.forgejo_url, path, None).await?;
+    let hooks = hooks
+        .as_array()
+        .ok_or_else(|| anyhow!("Forgejo system hooks response is not an array"))?;
+
+    let mut has_webhook = false;
+    for hook in hooks {
+        let url = hook_url(hook);
+
+        if url == Some(input.webhook_url.as_str()) {
+            has_webhook = true;
+        }
+
+        if url == Some(input.legacy_webhook_url.as_str()) {
+            delete_admin_hook(&input.forgejo_url, hook).await?;
+        }
+    }
+
+    if has_webhook {
+        return Ok(());
+    }
+
+    expect_forgejo_status(
+        Method::POST,
+        &input.forgejo_url,
+        "/api/v1/admin/hooks",
+        Some(json!({
+            "type": "gitea",
+            "config": {
+                "url": input.webhook_url,
+                "content_type": "json",
+                "is_system_webhook": true,
+            },
+            "events": ["push"],
+            "active": true,
+        })),
+        &[StatusCode::CREATED],
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgejoDeleteWebhookInput {
+    pub forgejo_url: String,
+    pub repo: String,
+    pub webhook_url: String,
+    pub legacy_webhook_url: String,
+}
+
+pub async fn forgejo_delete_webhook(
+    _ctx: ActivityContext,
+    input: ForgejoDeleteWebhookInput,
+) -> Result<(), ActivityError> {
+    let path = format!("/api/v1/repos/{}/hooks", input.repo);
+    let hooks = expect_forgejo_json(Method::GET, &input.forgejo_url, &path, None).await?;
+    let hooks = hooks
+        .as_array()
+        .ok_or_else(|| anyhow!("Forgejo hooks response is not an array"))?;
+
+    for hook in hooks {
+        let url = hook_url(hook);
+        if url == Some(input.webhook_url.as_str()) || url == Some(input.legacy_webhook_url.as_str())
+        {
+            let hook_id = hook
+                .get("id")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| anyhow!("Forgejo hook is missing id"))?;
+            let path = format!("/api/v1/repos/{}/hooks/{hook_id}", input.repo);
+            expect_forgejo_status(
+                Method::DELETE,
+                &input.forgejo_url,
+                &path,
+                None,
+                &[StatusCode::NO_CONTENT],
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn hook_url(hook: &JsonValue) -> Option<&str> {
+    hook.get("config")
+        .and_then(|config| config.get("url"))
+        .or_else(|| hook.get("url"))
+        .and_then(JsonValue::as_str)
+}
+
+async fn delete_admin_hook(forgejo_url: &str, hook: &JsonValue) -> Result<(), ActivityError> {
+    let hook_id = hook
+        .get("id")
+        .and_then(JsonValue::as_u64)
+        .ok_or_else(|| anyhow!("Forgejo hook is missing id"))?;
+    let path = format!("/api/v1/admin/hooks/{hook_id}");
+    expect_forgejo_status(
+        Method::DELETE,
+        forgejo_url,
+        &path,
+        None,
+        &[StatusCode::NO_CONTENT],
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgejoCommitStatusTarget {
     pub forgejo_url: String,
     pub repo: String,

@@ -45,14 +45,6 @@ impl PushToDeployWorkflow {
         };
         let source_repo = format!("{source_owner}/{source_repo_name}");
 
-        set_commit_status(
-            ctx,
-            input.commit_status.clone(),
-            "pending",
-            "Deployment workflow started",
-        )
-        .await;
-
         let targets_result = ctx
             .start_activity(
                 PlatformActivities::find_gitops_app_targets,
@@ -69,29 +61,23 @@ impl PushToDeployWorkflow {
         let targets = match targets_result {
             Ok(targets) => targets,
             Err(error) => {
-                set_commit_status(
-                    ctx,
-                    input.commit_status.clone(),
-                    "failure",
-                    "GitOps app target lookup failed",
-                )
-                .await;
                 return Err(error.into());
             }
         };
         if targets.is_empty() {
-            set_commit_status(
-                ctx,
-                input.commit_status.clone(),
-                "success",
-                "No matching app environment",
-            )
-            .await;
             if !ctx.is_replaying() {
                 info!(source_repo = %source_repo, environment = %input.environment, "no matching app environment");
             }
             return Ok(None);
         }
+
+        set_commit_status(
+            ctx,
+            input.commit_status.clone(),
+            "pending",
+            "Deployment workflow started",
+        )
+        .await;
 
         let image_result = ctx
             .start_activity(

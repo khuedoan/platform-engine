@@ -8,6 +8,7 @@ mod workspace;
 pub use app::*;
 pub use forgejo::*;
 pub use git::*;
+pub use git_auth::git_command_for_url;
 
 use crate::core::app::image::Image;
 use temporalio_macros::activities;
@@ -88,6 +89,22 @@ impl PlatformActivities {
         input: ForgejoEnsureWebhookInput,
     ) -> Result<(), ActivityError> {
         forgejo_ensure_webhook(ctx, input).await
+    }
+
+    #[activity]
+    pub async fn forgejo_ensure_system_webhook(
+        ctx: ActivityContext,
+        input: ForgejoEnsureSystemWebhookInput,
+    ) -> Result<(), ActivityError> {
+        forgejo_ensure_system_webhook(ctx, input).await
+    }
+
+    #[activity]
+    pub async fn forgejo_delete_webhook(
+        ctx: ActivityContext,
+        input: ForgejoDeleteWebhookInput,
+    ) -> Result<(), ActivityError> {
+        forgejo_delete_webhook(ctx, input).await
     }
 
     #[activity]

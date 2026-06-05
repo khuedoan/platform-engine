@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use super::options::command_activity_options;
 use crate::activities::{
-    FindGitopsSourceReposInput, ForgejoEnsureCollaboratorInput, ForgejoEnsureGitopsRepoSeededInput,
-    ForgejoEnsureRepoInput, ForgejoEnsureUserInput, ForgejoEnsureWebhookInput, PlatformActivities,
+    FindGitopsSourceReposInput, ForgejoDeleteWebhookInput, ForgejoEnsureCollaboratorInput,
+    ForgejoEnsureGitopsRepoSeededInput, ForgejoEnsureRepoInput, ForgejoEnsureSystemWebhookInput,
+    ForgejoEnsureUserInput, PlatformActivities,
 };
 use serde::{Deserialize, Serialize};
 use temporalio_macros::{workflow, workflow_methods};
@@ -109,6 +110,17 @@ impl ForgejoBootstrapWorkflow {
         .await?;
 
         ctx.start_activity(
+            PlatformActivities::forgejo_ensure_system_webhook,
+            ForgejoEnsureSystemWebhookInput {
+                forgejo_url: input.forgejo_url.clone(),
+                webhook_url: input.webhook_url.clone(),
+                legacy_webhook_url: input.legacy_webhook_url.clone(),
+            },
+            ActivityOptions::start_to_close_timeout(Duration::from_secs(60)),
+        )
+        .await?;
+
+        ctx.start_activity(
             PlatformActivities::forgejo_ensure_gitops_repo_seeded,
             ForgejoEnsureGitopsRepoSeededInput {
                 forgejo_url: input.forgejo_url.clone(),
@@ -139,8 +151,8 @@ impl ForgejoBootstrapWorkflow {
 
         for repo in source_repos {
             ctx.start_activity(
-                PlatformActivities::forgejo_ensure_webhook,
-                ForgejoEnsureWebhookInput {
+                PlatformActivities::forgejo_delete_webhook,
+                ForgejoDeleteWebhookInput {
                     forgejo_url: input.forgejo_url.clone(),
                     repo,
                     webhook_url: input.webhook_url.clone(),

@@ -55,9 +55,9 @@ pub struct AppTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct AppSourceTarget {
-    source_repo: String,
-    target: AppTarget,
+pub struct AppSourceTarget {
+    pub source_repo: String,
+    pub target: AppTarget,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -413,7 +413,7 @@ fn copy_app_manifests(
     Ok(count)
 }
 
-fn scan_app_source_targets(
+pub fn scan_app_source_targets(
     apps_dir: &Path,
     registry: &str,
 ) -> anyhow::Result<Vec<AppSourceTarget>> {
