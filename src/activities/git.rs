@@ -267,7 +267,7 @@ fn write_apps_bundle(
             for (environment, environment_dir) in child_dirs(&project_dir)? {
                 let app_env = format!("{tenant}/{project}/{environment}");
                 let app = app_artifact(output_dir, repository, &app_env);
-                let manifest_count = copy_app_manifests(&environment_dir, &app.dir)?;
+                let manifest_count = copy_app_manifests(&environment_dir, &app.dir, &app.name)?;
                 if manifest_count > 0 {
                     write_namespace(&app.dir, &app.name)?;
                     count += manifest_count;
@@ -311,7 +311,11 @@ fn child_dirs(path: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
     Ok(dirs)
 }
 
-fn copy_app_manifests(source_dir: &Path, output_dir: &Path) -> anyhow::Result<usize> {
+fn copy_app_manifests(
+    source_dir: &Path,
+    output_dir: &Path,
+    namespace: &str,
+) -> anyhow::Result<usize> {
     let mut count = 0;
     for entry in fs::read_dir(source_dir)? {
         let entry = entry?;
@@ -333,12 +337,44 @@ fn copy_app_manifests(source_dir: &Path, output_dir: &Path) -> anyhow::Result<us
         }
 
         let output_path = output_dir.join(entry.file_name());
-        fs::create_dir_all(output_dir)?;
-        fs::copy(&path, output_path)?;
+        let mut manifest: YamlValue = serde_yaml::from_reader(fs::File::open(&path)?)?;
+        set_manifest_namespace(&mut manifest, namespace)?;
+        write_yaml_manifest(&output_path, &manifest)?;
         count += 1;
     }
 
     Ok(count)
+}
+
+fn set_manifest_namespace(manifest: &mut YamlValue, namespace: &str) -> anyhow::Result<()> {
+    let YamlValue::Mapping(root) = manifest else {
+        return Err(anyhow!("app manifest must be a YAML mapping"));
+    };
+
+    let metadata_key = YamlValue::String("metadata".to_string());
+    let metadata = root
+        .entry(metadata_key)
+        .or_insert_with(|| YamlValue::Mapping(Default::default()));
+    let YamlValue::Mapping(metadata) = metadata else {
+        return Err(anyhow!("app manifest metadata must be a YAML mapping"));
+    };
+
+    metadata.insert(
+        YamlValue::String("namespace".to_string()),
+        YamlValue::String(namespace.to_string()),
+    );
+    Ok(())
+}
+
+fn write_yaml_manifest(path: &Path, manifest: &YamlValue) -> anyhow::Result<()> {
+    fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?,
+    )?;
+    let writer = fs::File::create(path)?;
+    let mut serializer = serde_yaml::Serializer::new(writer);
+    manifest.serialize(&mut serializer)?;
+    Ok(())
 }
 
 fn app_artifact(output_dir: &Path, repository: &str, app_env: &str) -> AppArtifact {
@@ -667,6 +703,11 @@ metadata:
             output
                 .join("apps/khuedoan/blog/production/namespace.yaml")
                 .exists()
+        );
+        assert!(
+            fs::read_to_string(output.join("apps/khuedoan/blog/production/service-blog.yaml"))
+                .unwrap()
+                .contains("namespace: khuedoan-blog-production")
         );
         assert!(
             fs::read_to_string(output.join("root/ocirepository-khuedoan-blog-production.yaml"))
