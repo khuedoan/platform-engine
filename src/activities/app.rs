@@ -192,33 +192,18 @@ async fn build_image(ctx: &ActivityContext, builder: Builder) -> Result<Image, A
     match builder {
         Builder::Dockerfile(path, image) => {
             info!("building container image with Dockerfile");
-            let image_ref = format!("{image}");
-            let cache_ref = pull_docker_build_cache(ctx, &image).await?;
-            let mut command = Command::new("docker");
-            command.env("DOCKER_BUILDKIT", "1");
-            command.arg("build");
-            configure_docker_build_network(&mut command);
-            if let Some(cache_ref) = &cache_ref {
-                command.args(["--cache-from", cache_ref]);
-            }
-            command.args(["--tag", &image_ref]);
-            if docker_build_registry_cache_enabled() {
-                command.args(["--tag", &docker_build_cache_ref(&image)]);
-            }
-            command.arg(".").current_dir(path);
-            run_checked_command(ctx, &mut command, "docker build").await?;
-            push_docker_build_cache(ctx, &image).await?;
-            Ok(image)
+            build_docker_context(ctx, &path, None, image).await
         }
         Builder::Nixpacks(path, image) => {
             info!("building container image with Nixpacks");
-            let image_ref = format!("{image}");
             let mut command = Command::new("nixpacks");
             command
-                .args(["build", ".", "--tag", &image_ref])
-                .current_dir(path);
-            run_checked_command(ctx, &mut command, "nixpacks build").await?;
-            Ok(image)
+                .args(["build", ".", "--out", ".", "--current-dir"])
+                .arg("--no-error-without-start")
+                .current_dir(&path);
+            run_checked_command(ctx, &mut command, "nixpacks generate").await?;
+
+            build_docker_context(ctx, &path, Some(".nixpacks/Dockerfile"), image).await
         }
         Builder::Vendor(source_image, image) => {
             let source_ref = format!("{source_image}");
@@ -235,6 +220,34 @@ async fn build_image(ctx: &ActivityContext, builder: Builder) -> Result<Image, A
             Ok(image)
         }
     }
+}
+
+async fn build_docker_context(
+    ctx: &ActivityContext,
+    context: &std::path::Path,
+    dockerfile: Option<&str>,
+    image: Image,
+) -> Result<Image, ActivityError> {
+    let image_ref = format!("{image}");
+    let cache_ref = pull_docker_build_cache(ctx, &image).await?;
+    let mut command = Command::new("docker");
+    command.env("DOCKER_BUILDKIT", "1");
+    command.arg("build");
+    configure_docker_build_network(&mut command);
+    if let Some(cache_ref) = &cache_ref {
+        command.args(["--cache-from", cache_ref]);
+    }
+    if let Some(dockerfile) = dockerfile {
+        command.args(["--file", dockerfile]);
+    }
+    command.args(["--tag", &image_ref]);
+    if docker_build_registry_cache_enabled() {
+        command.args(["--tag", &docker_build_cache_ref(&image)]);
+    }
+    command.arg(".").current_dir(context);
+    run_checked_command(ctx, &mut command, "docker build").await?;
+    push_docker_build_cache(ctx, &image).await?;
+    Ok(image)
 }
 
 async fn pull_docker_build_cache(
