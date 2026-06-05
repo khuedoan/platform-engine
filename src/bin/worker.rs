@@ -1,7 +1,6 @@
 use anyhow::Result;
-use gethostname::gethostname;
 use platform_engine::{activities::*, temporal, workflows};
-use std::{env, time::Duration};
+use std::{env, fs, time::Duration};
 use temporalio_common::worker::WorkerDeploymentOptions;
 use temporalio_sdk::{Worker, WorkerOptions};
 use temporalio_sdk_core::{CoreRuntime, RuntimeOptions};
@@ -17,7 +16,7 @@ async fn main() -> Result<()> {
 
     let client = temporal::get_client().await?;
     let task_queue = env::var("TASK_QUEUE").unwrap_or_else(|_| "main".to_string());
-    let worker_identity = gethostname().to_string_lossy().into_owned();
+    let worker_identity = worker_identity();
     let deployment_options =
         WorkerDeploymentOptions::from_build_id(env!("CARGO_PKG_VERSION").to_string());
 
@@ -49,6 +48,15 @@ async fn main() -> Result<()> {
     worker.run().await?;
 
     Ok(())
+}
+
+fn worker_identity() -> String {
+    fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .or_else(|| env::var("HOSTNAME").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "netamos-worker".to_string())
 }
 
 async fn sync_forgejo_bootstrap_schedule(
