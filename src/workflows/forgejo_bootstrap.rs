@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use super::options::command_activity_options;
 use crate::activities::{
-    ForgejoEnsureCollaboratorInput, ForgejoEnsureGitopsRepoSeededInput, ForgejoEnsureRepoInput,
-    ForgejoEnsureUserInput, ForgejoEnsureWebhookInput, PlatformActivities,
+    FindGitopsSourceReposInput, ForgejoEnsureCollaboratorInput, ForgejoEnsureGitopsRepoSeededInput,
+    ForgejoEnsureRepoInput, ForgejoEnsureUserInput, ForgejoEnsureWebhookInput, PlatformActivities,
 };
 use serde::{Deserialize, Serialize};
 use temporalio_macros::{workflow, workflow_methods};
@@ -17,10 +17,10 @@ pub struct ForgejoBootstrapInput {
     pub bot_email: String,
     pub webhook_url: String,
     pub legacy_webhook_url: String,
-    pub webhook_repos: Vec<String>,
     pub gitops_repo: String,
     pub gitops_source_url: String,
     pub gitops_revision: String,
+    pub registry: String,
 }
 
 impl ForgejoBootstrapInput {
@@ -37,52 +37,20 @@ impl ForgejoBootstrapInput {
             }),
             legacy_webhook_url: std::env::var("NETAMOS_WEBHOOK_LEGACY_URL")
                 .unwrap_or_else(|_| "http://netamos.netamos.svc.cluster.local:8080".to_string()),
-            webhook_repos: std::env::var("NETAMOS_WEBHOOK_REPOS")
-                .unwrap_or_else(|_| "khuedoan/blog".to_string())
-                .split(',')
-                .map(str::trim)
-                .filter(|repo| !repo.is_empty())
-                .map(webhook_repo_name)
-                .map(ToString::to_string)
-                .collect(),
             gitops_repo: std::env::var("GITOPS_REPO")
                 .unwrap_or_else(|_| "khuedoan/cloudlab".to_string()),
             gitops_source_url: std::env::var("GITOPS_SOURCE_URL")
                 .unwrap_or_else(|_| "https://github.com/khuedoan/cloudlab".to_string()),
             gitops_revision: std::env::var("GITOPS_REVISION")
                 .unwrap_or_else(|_| "master".to_string()),
+            registry: std::env::var("REGISTRY").unwrap_or_else(|_| "localhost:5000".to_string()),
         }
     }
-}
-
-fn webhook_repo_name(repo_spec: &str) -> &str {
-    repo_spec
-        .split_once('=')
-        .map_or(repo_spec, |(source, _)| source)
-        .trim()
 }
 
 #[workflow]
 pub struct ForgejoBootstrapWorkflow {
     input: ForgejoBootstrapInput,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::webhook_repo_name;
-
-    #[test]
-    fn webhook_repo_name_allows_direct_repo_specs() {
-        assert_eq!(webhook_repo_name("khuedoan/blog"), "khuedoan/blog");
-    }
-
-    #[test]
-    fn webhook_repo_name_uses_source_side_of_mapping_specs() {
-        assert_eq!(
-            webhook_repo_name("khuedoan/example-service=test/example"),
-            "khuedoan/example-service"
-        );
-    }
 }
 
 #[workflow_methods]
@@ -152,7 +120,24 @@ impl ForgejoBootstrapWorkflow {
         )
         .await?;
 
-        for repo in input.webhook_repos {
+        let gitops_url = format!(
+            "{}/{}.git",
+            input.forgejo_url.trim_end_matches('/'),
+            input.gitops_repo
+        );
+        let source_repos = ctx
+            .start_activity(
+                PlatformActivities::find_gitops_source_repos,
+                FindGitopsSourceReposInput {
+                    url: gitops_url,
+                    revision: input.gitops_revision.clone(),
+                    registry: input.registry.clone(),
+                },
+                command_activity_options(Duration::from_secs(300)),
+            )
+            .await?;
+
+        for repo in source_repos {
             ctx.start_activity(
                 PlatformActivities::forgejo_ensure_webhook,
                 ForgejoEnsureWebhookInput {
