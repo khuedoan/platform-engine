@@ -3,28 +3,39 @@ use std::{
     env,
     path::PathBuf,
     process::Stdio,
+    str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow};
 use axum::{
-    Router,
+    Json, Router,
     body::Bytes,
-    extract::State,
-    http::{HeaderMap, StatusCode},
+    extract::{Path as AxumPath, State},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
+};
+use openidconnect::{
+    ClientId, IssuerUrl, Nonce,
+    core::{CoreClient, CoreIdToken, CoreProviderMetadata},
+    reqwest as oidc_reqwest,
 };
 use platform_engine::{
     activities::{
         AppSourceTarget, AppTarget, ForgejoCommitStatusTarget, git_command_for_url,
-        scan_app_source_targets,
+        scan_app_inventory, scan_app_source_targets,
+    },
+    api::{
+        AuthConfig as ApiAuthConfig, CreateAppRequest, DeployRequest, ProjectSummary, UserInfo,
+        WorkflowStarted, WorkflowStatus,
     },
     core::app::source::Source,
     temporal, workflows,
 };
 use serde::Deserialize;
+use serde_json::json;
 use tokio::{fs, net::TcpListener, process::Command, sync::Mutex};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -34,6 +45,7 @@ struct AppState {
     client: Arc<temporalio_client::Client>,
     config: AppConfig,
     gitops_index: Arc<GitopsIndex>,
+    auth: Arc<AuthVerifier>,
 }
 
 #[derive(Clone)]
@@ -45,8 +57,12 @@ struct AppConfig {
     gitops_index_ttl: Duration,
     registry: String,
     forgejo_url: Option<String>,
+    forgejo_public_url: Option<String>,
     temporal_web_url: Option<String>,
     temporal_namespace: String,
+    oidc_issuer: Option<String>,
+    oidc_client_id: String,
+    oidc_audience: String,
 }
 
 impl AppConfig {
@@ -69,11 +85,177 @@ impl AppConfig {
                 .unwrap_or_else(|_| "master".to_string()),
             registry: std::env::var("REGISTRY").unwrap_or_else(|_| "localhost:5000".to_string()),
             forgejo_url: std::env::var("FORGEJO_URL").ok(),
+            forgejo_public_url: std::env::var("FORGEJO_PUBLIC_URL").ok(),
             temporal_web_url: std::env::var("TEMPORAL_WEB_URL").ok(),
             temporal_namespace: std::env::var("TEMPORAL_NAMESPACE")
                 .unwrap_or_else(|_| "default".to_string()),
+            oidc_issuer: std::env::var("OIDC_ISSUER").ok(),
+            oidc_client_id: std::env::var("OIDC_CLIENT_ID")
+                .unwrap_or_else(|_| "netamos-cli".to_string()),
+            oidc_audience: std::env::var("OIDC_AUDIENCE")
+                .unwrap_or_else(|_| "netamos-api".to_string()),
         })
     }
+}
+
+struct AuthVerifier {
+    http: oidc_reqwest::Client,
+    issuer: Option<String>,
+    client_id: String,
+    audience: String,
+}
+
+impl AuthVerifier {
+    fn new(config: &AppConfig) -> Result<Self> {
+        Ok(Self {
+            http: oidc_http_client()?,
+            issuer: config.oidc_issuer.clone(),
+            client_id: config.oidc_client_id.clone(),
+            audience: config.oidc_audience.clone(),
+        })
+    }
+
+    fn config(&self) -> Result<ApiAuthConfig, ApiError> {
+        let issuer = self
+            .issuer
+            .clone()
+            .ok_or_else(|| ApiError::unavailable("OIDC_ISSUER is not configured"))?;
+        Ok(ApiAuthConfig {
+            issuer,
+            client_id: self.client_id.clone(),
+            scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+                "offline_access".to_string(),
+                format!("audience:server:client_id:{}", self.audience),
+            ],
+        })
+    }
+
+    async fn verify(&self, headers: &HeaderMap) -> Result<UserInfo, ApiError> {
+        let issuer = self
+            .issuer
+            .as_deref()
+            .ok_or_else(|| ApiError::unavailable("OIDC_ISSUER is not configured"))?;
+        let token = bearer_token(headers)?;
+        let provider = CoreProviderMetadata::discover_async(
+            IssuerUrl::new(issuer.to_string())
+                .map_err(|error| ApiError::unavailable(error.to_string()))?,
+            &self.http,
+        )
+        .await
+        .map_err(|error| ApiError::bad_gateway(error.to_string()))?;
+        let client = CoreClient::from_provider_metadata(
+            provider,
+            ClientId::new(self.audience.clone()),
+            None,
+        );
+        let id_token = CoreIdToken::from_str(&token)
+            .map_err(|error| ApiError::unauthorized(error.to_string()))?;
+        let claims = id_token
+            .claims(&client.id_token_verifier(), no_nonce)
+            .map_err(|error| ApiError::unauthorized(error.to_string()))?;
+
+        match claims.authorized_party() {
+            Some(authorized_party) if authorized_party.as_str() == self.client_id => {}
+            Some(authorized_party) => {
+                return Err(ApiError::unauthorized(format!(
+                    "token authorized party must be {} (found {})",
+                    self.client_id,
+                    authorized_party.as_str()
+                )));
+            }
+            None => return Err(ApiError::unauthorized("token has no authorized party")),
+        }
+
+        Ok(UserInfo {
+            subject: claims.subject().as_str().to_string(),
+            username: claims
+                .preferred_username()
+                .map(|username| username.as_str().to_string()),
+            email: claims.email().map(|email| email.as_str().to_string()),
+        })
+    }
+}
+
+fn oidc_http_client() -> Result<oidc_reqwest::Client> {
+    Ok(oidc_reqwest::ClientBuilder::new()
+        .redirect(oidc_reqwest::redirect::Policy::none())
+        .build()?)
+}
+
+fn no_nonce(nonce: Option<&Nonce>) -> std::result::Result<(), String> {
+    match nonce {
+        Some(_) => Err("unexpected nonce claim".to_string()),
+        None => Ok(()),
+    }
+}
+
+struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+        }
+    }
+
+    fn bad_gateway(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: message.into(),
+        }
+    }
+
+    fn internal(error: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: error.to_string(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        (
+            self.status,
+            Json(json!({
+                "error": self.message,
+            })),
+        )
+            .into_response()
+    }
+}
+
+fn bearer_token(headers: &HeaderMap) -> Result<String, ApiError> {
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .ok_or_else(|| ApiError::unauthorized("missing Authorization header"))?
+        .to_str()
+        .map_err(|_| ApiError::unauthorized("invalid Authorization header"))?;
+    let token = value
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| ApiError::unauthorized("Authorization header must use Bearer"))?;
+    Ok(token.to_string())
 }
 
 struct GitopsIndex {
@@ -188,18 +370,164 @@ async fn main() -> Result<()> {
 
     let state = AppState {
         client: Arc::new(client),
+        auth: Arc::new(AuthVerifier::new(&config)?),
         config,
         gitops_index,
     };
 
     let app = Router::new()
+        .route("/api/v1/auth/config", get(auth_config))
+        .route("/api/v1/me", get(me))
+        .route("/api/v1/projects", get(list_projects))
+        .route("/api/v1/apps", post(create_app))
+        .route("/api/v1/deployments", post(create_deployment))
+        .route("/api/v1/workflows/{workflow_id}", get(workflow_status))
         .route("/webhooks/gitea", post(handle_gitea_webhook))
-        .route("/healthz", post(|| async { StatusCode::NO_CONTENT }))
+        .route(
+            "/healthz",
+            get(|| async { StatusCode::NO_CONTENT }).post(|| async { StatusCode::NO_CONTENT }),
+        )
         .with_state(state);
 
     let listener = TcpListener::bind("[::]:8080").await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn auth_config(State(state): State<AppState>) -> Result<Json<ApiAuthConfig>, ApiError> {
+    Ok(Json(state.auth.config()?))
+}
+
+async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<UserInfo>, ApiError> {
+    Ok(Json(state.auth.verify(&headers).await?))
+}
+
+async fn list_projects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ProjectSummary>>, ApiError> {
+    state.auth.verify(&headers).await?;
+    state
+        .gitops_index
+        .refresh_if_stale()
+        .await
+        .map_err(ApiError::internal)?;
+    let apps = scan_app_inventory(
+        &state.gitops_index.config.cache_dir.join("apps"),
+        &state.config.registry,
+    )
+    .map_err(ApiError::internal)?;
+    Ok(Json(
+        apps.into_iter()
+            .map(|app| ProjectSummary {
+                tenant: app.tenant,
+                project: app.project,
+                environment: app.environment,
+                resources: app.resources,
+                hostnames: app.hostnames,
+                images: app.images,
+                source_repos: app.source_repos,
+            })
+            .collect(),
+    ))
+}
+
+async fn create_app(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateAppRequest>,
+) -> Result<Json<WorkflowStarted>, ApiError> {
+    state.auth.verify(&headers).await?;
+    request.validate().map_err(ApiError::bad_request)?;
+    let workflow_id = format!("create-app-{}", sanitize(&request.app_path()));
+    workflows::start_create_app_workflow(
+        &state.client,
+        workflow_id.clone(),
+        workflows::create_app::CreateAppInput {
+            gitops_url: state.config.gitops_url.clone(),
+            gitops_revision: state.config.gitops_revision.clone(),
+            registry: state.config.registry.clone(),
+            request,
+        },
+    )
+    .await
+    .map_err(ApiError::internal)?;
+
+    Ok(Json(WorkflowStarted { workflow_id }))
+}
+
+async fn create_deployment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<DeployRequest>,
+) -> Result<Json<WorkflowStarted>, ApiError> {
+    state.auth.verify(&headers).await?;
+    let (owner, repo_name) = request
+        .repo
+        .split_once('/')
+        .ok_or_else(|| ApiError::bad_request("repo must be in owner/name form"))?;
+    let source_url = forgejo_clone_url(&state.config, &request.repo);
+    let workflow_id = format!(
+        "push-to-deploy-{}-{}",
+        sanitize(repo_name),
+        &request.revision[..std::cmp::min(12, request.revision.len())]
+    );
+    let source = Source::Git {
+        owner: owner.to_string(),
+        name: repo_name.to_string(),
+        url: source_url,
+        revision: request.revision.clone(),
+        path: PathBuf::from(format!("/tmp/{}-{}", sanitize(repo_name), request.revision)),
+    };
+    let commit_status = state.config.forgejo_url.as_ref().and_then(|forgejo_url| {
+        state
+            .config
+            .temporal_web_url
+            .as_ref()
+            .map(|temporal_web_url| ForgejoCommitStatusTarget {
+                forgejo_url: forgejo_url.clone(),
+                repo: request.repo.clone(),
+                sha: request.revision.clone(),
+                target_url: temporal_workflow_url(
+                    temporal_web_url,
+                    &state.config.temporal_namespace,
+                    &workflow_id,
+                ),
+            })
+    });
+
+    workflows::start_workflow(
+        &state.client,
+        workflow_id.clone(),
+        platform_engine::workflows::push_to_deploy::PushToDeployInput {
+            source,
+            gitops_url: state.config.gitops_url.clone(),
+            gitops_revision: state.config.gitops_revision.clone(),
+            environment: request.environment,
+            registry: state.config.registry.clone(),
+            commit_status,
+        },
+    )
+    .await
+    .map_err(ApiError::internal)?;
+
+    Ok(Json(WorkflowStarted { workflow_id }))
+}
+
+async fn workflow_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(workflow_id): AxumPath<String>,
+) -> Result<Json<WorkflowStatus>, ApiError> {
+    state.auth.verify(&headers).await?;
+    let url =
+        state.config.temporal_web_url.as_ref().map(|base| {
+            temporal_workflow_url(base, &state.config.temporal_namespace, &workflow_id)
+        });
+    workflows::describe_workflow(&state.client, workflow_id, url)
+        .await
+        .map(Json)
+        .map_err(ApiError::internal)
 }
 
 async fn handle_gitea_webhook(
@@ -482,6 +810,16 @@ fn temporal_workflow_url(base_url: &str, namespace: &str, workflow_id: &str) -> 
         namespace,
         workflow_id
     )
+}
+
+fn forgejo_clone_url(config: &AppConfig, repo: &str) -> String {
+    let base = config
+        .forgejo_public_url
+        .as_ref()
+        .or(config.forgejo_url.as_ref())
+        .map(|url| url.trim_end_matches('/'))
+        .unwrap_or("");
+    format!("{base}/{repo}.git")
 }
 
 #[cfg(test)]
