@@ -44,6 +44,8 @@ impl PushToDeployWorkflow {
                 PublishImageFromSourceInput {
                     source: input.source.clone(),
                     registry: input.registry.clone(),
+                    image_owner: input.tenant.clone(),
+                    image_repository: input.project.clone(),
                 },
                 command_activity_options(Duration::from_secs(1200)),
             )

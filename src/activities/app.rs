@@ -17,6 +17,8 @@ const BUILD_CACHE_TAG: &str = "buildcache-image";
 pub struct PublishImageFromSourceInput {
     pub source: Source,
     pub registry: String,
+    pub image_owner: String,
+    pub image_repository: String,
 }
 
 pub async fn publish_image_from_source(
@@ -25,7 +27,14 @@ pub async fn publish_image_from_source(
 ) -> Result<Image, ActivityError> {
     let (_workspace, source) = source_with_activity_workspace(input.source);
     let source = pull_source(&ctx, source).await?;
-    let builder = detect_builder(&ctx, &source, &input.registry).await?;
+    let builder = detect_builder(
+        &ctx,
+        &source,
+        &input.registry,
+        &input.image_owner,
+        &input.image_repository,
+    )
+    .await?;
     let image = builder_image(&builder);
 
     if image_exists_in_registry(&ctx, &image).await? {
@@ -120,23 +129,19 @@ async fn detect_builder(
     ctx: &ActivityContext,
     source: &Source,
     registry: &str,
+    image_owner: &str,
+    image_repository: &str,
 ) -> Result<Builder, ActivityError> {
     if ctx.is_cancelled() {
         return Err(ActivityError::cancelled());
     }
 
     match source {
-        Source::Git {
-            name,
-            owner,
-            revision,
-            path,
-            ..
-        } => {
+        Source::Git { revision, path, .. } => {
             let image = Image {
                 registry: registry.to_owned(),
-                owner: owner.to_string(),
-                repository: name.to_string(),
+                owner: image_owner.to_owned(),
+                repository: image_repository.to_owned(),
                 tag: revision.to_string(),
             };
 
@@ -157,8 +162,8 @@ async fn detect_builder(
             image.clone(),
             Image {
                 registry: registry.to_owned(),
-                owner: image.owner.clone(),
-                repository: image.repository.clone(),
+                owner: image_owner.to_owned(),
+                repository: image_repository.to_owned(),
                 tag: image.tag.clone(),
             },
         )),

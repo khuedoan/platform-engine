@@ -42,6 +42,7 @@ impl ForgejoBootstrapInput {
                 .split(',')
                 .map(str::trim)
                 .filter(|repo| !repo.is_empty())
+                .map(webhook_repo_name)
                 .map(ToString::to_string)
                 .collect(),
             gitops_repo: std::env::var("GITOPS_REPO")
@@ -54,9 +55,34 @@ impl ForgejoBootstrapInput {
     }
 }
 
+fn webhook_repo_name(repo_spec: &str) -> &str {
+    repo_spec
+        .split_once('=')
+        .map_or(repo_spec, |(source, _)| source)
+        .trim()
+}
+
 #[workflow]
 pub struct ForgejoBootstrapWorkflow {
     input: ForgejoBootstrapInput,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::webhook_repo_name;
+
+    #[test]
+    fn webhook_repo_name_allows_direct_repo_specs() {
+        assert_eq!(webhook_repo_name("khuedoan/blog"), "khuedoan/blog");
+    }
+
+    #[test]
+    fn webhook_repo_name_uses_source_side_of_mapping_specs() {
+        assert_eq!(
+            webhook_repo_name("khuedoan/example-service=test/example"),
+            "khuedoan/example-service"
+        );
+    }
 }
 
 #[workflow_methods]
