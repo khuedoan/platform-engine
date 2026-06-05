@@ -217,7 +217,7 @@ pub async fn forgejo_ensure_system_webhook(
             "config": {
                 "url": input.webhook_url,
                 "content_type": "json",
-                "is_system_webhook": true,
+                "is_system_webhook": "true",
             },
             "events": ["push"],
             "active": true,
