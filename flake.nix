@@ -1,7 +1,6 @@
 {
   inputs = {
-    # TODO switch back to stable channel when Rust 1.88 is available, probably in 25.11
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   };
 
   outputs = { self, nixpkgs }:
