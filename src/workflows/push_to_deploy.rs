@@ -6,7 +6,7 @@ use crate::core::app::{image::Image, source::Source};
 use serde::{Deserialize, Serialize};
 use temporalio_macros::{workflow, workflow_methods};
 use temporalio_sdk::{WorkflowContext, WorkflowContextView, WorkflowResult};
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushToDeployInput {
@@ -17,6 +17,8 @@ pub struct PushToDeployInput {
     pub project: String,
     pub environment: String,
     pub registry: String,
+    #[serde(default)]
+    pub commit_status: Option<ForgejoCommitStatusTarget>,
 }
 
 #[workflow]
@@ -38,7 +40,15 @@ impl PushToDeployWorkflow {
             info!("starting push to deploy: {input:?}");
         }
 
-        let image: Image = ctx
+        set_commit_status(
+            ctx,
+            input.commit_status.clone(),
+            "pending",
+            "Deployment workflow started",
+        )
+        .await;
+
+        let image_result = ctx
             .start_activity(
                 PlatformActivities::publish_image_from_source,
                 PublishImageFromSourceInput {
@@ -49,7 +59,20 @@ impl PushToDeployWorkflow {
                 },
                 command_activity_options(Duration::from_secs(1200)),
             )
-            .await?;
+            .await;
+        let image = match image_result {
+            Ok(image) => image,
+            Err(error) => {
+                set_commit_status(
+                    ctx,
+                    input.commit_status.clone(),
+                    "failure",
+                    "Image build failed",
+                )
+                .await;
+                return Err(error.into());
+            }
+        };
 
         let update = UpdateGitopsImageInput {
             url: input.gitops_url.clone(),
@@ -58,22 +81,71 @@ impl PushToDeployWorkflow {
             project: input.project.clone(),
             environment: input.environment.clone(),
             image: image.clone(),
+            commit_status: input.commit_status.clone(),
         };
-        ctx.start_activity(
-            PlatformActivities::enqueue_gitops_publish,
-            EnqueueGitopsPublishInput {
-                workflow_id: gitops_publish_workflow_id(&input.gitops_revision),
-                update,
-            },
-            command_activity_options(Duration::from_secs(300)),
+
+        set_commit_status(
+            ctx,
+            input.commit_status.clone(),
+            "pending",
+            "Image built; publishing GitOps update",
         )
-        .await?;
+        .await;
+
+        let enqueue_result = ctx
+            .start_activity(
+                PlatformActivities::enqueue_gitops_publish,
+                EnqueueGitopsPublishInput {
+                    workflow_id: gitops_publish_workflow_id(&input.gitops_revision),
+                    update,
+                },
+                command_activity_options(Duration::from_secs(300)),
+            )
+            .await;
+        if let Err(error) = enqueue_result {
+            set_commit_status(
+                ctx,
+                input.commit_status.clone(),
+                "failure",
+                "GitOps publish failed to queue",
+            )
+            .await;
+            return Err(error.into());
+        }
 
         if !ctx.is_replaying() {
             info!("queued GitOps and apps OCI publish");
         }
 
         Ok(image)
+    }
+}
+
+async fn set_commit_status(
+    ctx: &mut WorkflowContext<PushToDeployWorkflow>,
+    target: Option<ForgejoCommitStatusTarget>,
+    state: &str,
+    description: &str,
+) {
+    let Some(target) = target else {
+        return;
+    };
+
+    let result = ctx
+        .start_activity(
+            PlatformActivities::forgejo_create_commit_status,
+            ForgejoCreateCommitStatusInput {
+                target,
+                state: state.to_string(),
+                description: description.to_string(),
+            },
+            command_activity_options(Duration::from_secs(30)),
+        )
+        .await;
+    if let Err(error) = result {
+        if !ctx.is_replaying() {
+            warn!(error = %error, "failed to create Forgejo commit status");
+        }
     }
 }
 

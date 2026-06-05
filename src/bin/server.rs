@@ -9,7 +9,9 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
-use platform_engine::{core::app::source::Source, temporal, workflows};
+use platform_engine::{
+    activities::ForgejoCommitStatusTarget, core::app::source::Source, temporal, workflows,
+};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -27,6 +29,9 @@ struct AppConfig {
     gitops_revision: String,
     registry: String,
     repo_mappings: HashMap<String, AppTarget>,
+    forgejo_url: Option<String>,
+    temporal_web_url: Option<String>,
+    temporal_namespace: String,
 }
 
 impl AppConfig {
@@ -48,6 +53,10 @@ impl AppConfig {
                 .map(|spec| parse_repo_mappings(&spec))
                 .transpose()?
                 .unwrap_or_default(),
+            forgejo_url: std::env::var("FORGEJO_URL").ok(),
+            temporal_web_url: std::env::var("TEMPORAL_WEB_URL").ok(),
+            temporal_namespace: std::env::var("TEMPORAL_NAMESPACE")
+                .unwrap_or_else(|_| "default".to_string()),
         })
     }
 }
@@ -166,6 +175,22 @@ async fn handle_gitea_webhook(
                 sanitize(&repo_name),
                 &revision[..std::cmp::min(12, revision.len())]
             );
+            let commit_status = state.config.forgejo_url.as_ref().and_then(|forgejo_url| {
+                state
+                    .config
+                    .temporal_web_url
+                    .as_ref()
+                    .map(|temporal_web_url| ForgejoCommitStatusTarget {
+                        forgejo_url: forgejo_url.clone(),
+                        repo: source_repo.clone(),
+                        sha: revision.clone(),
+                        target_url: temporal_workflow_url(
+                            temporal_web_url,
+                            &state.config.temporal_namespace,
+                            &workflow_id,
+                        ),
+                    })
+            });
 
             let push_to_deploy_input =
                 platform_engine::workflows::push_to_deploy::PushToDeployInput {
@@ -176,6 +201,7 @@ async fn handle_gitea_webhook(
                     project: target.project,
                     environment,
                     registry: state.config.registry.clone(),
+                    commit_status,
                 };
 
             // Start workflow
@@ -249,9 +275,18 @@ fn branch_name(git_ref: &str) -> &str {
     git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref)
 }
 
+fn temporal_workflow_url(base_url: &str, namespace: &str, workflow_id: &str) -> String {
+    format!(
+        "{}/namespaces/{}/workflows/{}",
+        base_url.trim_end_matches('/'),
+        namespace,
+        workflow_id
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AppTarget, app_environment, parse_repo_mappings};
+    use super::{AppTarget, app_environment, parse_repo_mappings, temporal_workflow_url};
 
     #[test]
     fn app_environment_uses_production_for_default_branch() {
@@ -293,6 +328,18 @@ mod tests {
                 tenant: "test".to_string(),
                 project: "example".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn temporal_workflow_url_trims_base_url() {
+        assert_eq!(
+            temporal_workflow_url(
+                "https://temporal.example.com/",
+                "default",
+                "push-to-deploy-example-abc123"
+            ),
+            "https://temporal.example.com/namespaces/default/workflows/push-to-deploy-example-abc123"
         );
     }
 }

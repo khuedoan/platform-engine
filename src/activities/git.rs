@@ -1,4 +1,5 @@
 use super::{
+    forgejo::ForgejoCommitStatusTarget,
     git_auth::git_command_for_url,
     process::{run_checked_command, run_stdout_command},
     workspace::TempWorkspace,
@@ -28,6 +29,8 @@ pub struct UpdateGitopsImageInput {
     pub project: String,
     pub environment: String,
     pub image: Image,
+    #[serde(default)]
+    pub commit_status: Option<ForgejoCommitStatusTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

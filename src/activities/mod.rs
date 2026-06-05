@@ -83,6 +83,14 @@ impl PlatformActivities {
     }
 
     #[activity]
+    pub async fn forgejo_create_commit_status(
+        ctx: ActivityContext,
+        input: ForgejoCreateCommitStatusInput,
+    ) -> Result<(), ActivityError> {
+        forgejo_create_commit_status(ctx, input).await
+    }
+
+    #[activity]
     pub async fn forgejo_ensure_gitops_repo_seeded(
         ctx: ActivityContext,
         input: ForgejoEnsureGitopsRepoSeededInput,

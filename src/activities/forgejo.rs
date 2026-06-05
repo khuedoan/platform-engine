@@ -9,6 +9,8 @@ use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tokio::time::{Duration, sleep};
 use tokio::{fs::remove_dir_all, process::Command};
 
+pub const FORGEJO_COMMIT_STATUS_CONTEXT: &str = "netamos/push-to-deploy";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgejoEnsureUserInput {
     pub forgejo_url: String,
@@ -164,6 +166,46 @@ pub async fn forgejo_ensure_webhook(
             },
             "events": ["push"],
             "active": true,
+        })),
+        &[StatusCode::CREATED],
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgejoCommitStatusTarget {
+    pub forgejo_url: String,
+    pub repo: String,
+    pub sha: String,
+    pub target_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgejoCreateCommitStatusInput {
+    pub target: ForgejoCommitStatusTarget,
+    pub state: String,
+    pub description: String,
+}
+
+pub async fn forgejo_create_commit_status(
+    _ctx: ActivityContext,
+    input: ForgejoCreateCommitStatusInput,
+) -> Result<(), ActivityError> {
+    let path = format!(
+        "/api/v1/repos/{}/statuses/{}",
+        input.target.repo, input.target.sha
+    );
+    expect_forgejo_status(
+        Method::POST,
+        &input.target.forgejo_url,
+        &path,
+        Some(json!({
+            "context": FORGEJO_COMMIT_STATUS_CONTEXT,
+            "description": input.description,
+            "state": input.state,
+            "target_url": input.target.target_url,
         })),
         &[StatusCode::CREATED],
     )
