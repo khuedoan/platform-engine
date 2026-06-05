@@ -35,6 +35,14 @@ impl PlatformActivities {
     }
 
     #[activity]
+    pub async fn enqueue_gitops_publish(
+        ctx: ActivityContext,
+        input: EnqueueGitopsPublishInput,
+    ) -> Result<(), ActivityError> {
+        enqueue_gitops_publish(ctx, input).await
+    }
+
+    #[activity]
     pub async fn forgejo_wait(
         ctx: ActivityContext,
         forgejo_url: String,

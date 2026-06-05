@@ -25,7 +25,6 @@ struct AppState {
 struct AppConfig {
     gitops_url: String,
     gitops_revision: String,
-    app_cluster: String,
     registry: String,
 }
 
@@ -42,7 +41,6 @@ impl AppConfig {
             gitops_url,
             gitops_revision: std::env::var("GITOPS_REVISION")
                 .unwrap_or_else(|_| "master".to_string()),
-            app_cluster: std::env::var("APP_CLUSTER").unwrap_or_else(|_| "production".to_string()),
             registry: std::env::var("REGISTRY").unwrap_or_else(|_| "localhost:5000".to_string()),
         })
     }
@@ -58,12 +56,16 @@ struct RepoInfo {
     name: String,
     owner: Owner,
     #[serde(default)]
+    default_branch: String,
+    #[serde(default)]
     clone_url: String,
 }
 
 #[derive(Deserialize)]
 struct PushPayload {
     after: String,
+    #[serde(rename = "ref")]
+    git_ref: String,
     repository: RepoInfo,
 }
 
@@ -116,6 +118,7 @@ async fn handle_gitea_webhook(
             let owner = payload.repository.owner.username;
             let repo_name = payload.repository.name;
             let revision = payload.after;
+            let environment = app_environment(&payload.git_ref, &payload.repository.default_branch);
             let url = payload.repository.clone_url;
             let workspace_path = format!("/tmp/{}-{}", sanitize(&repo_name), &revision);
 
@@ -147,10 +150,9 @@ async fn handle_gitea_webhook(
                     source,
                     gitops_url: state.config.gitops_url.clone(),
                     gitops_revision: state.config.gitops_revision.clone(),
-                    namespace: owner,
-                    app: repo_name.clone(),
-                    // TODO detect this based on branching strategy
-                    cluster: state.config.app_cluster.clone(),
+                    tenant: owner,
+                    project: repo_name.clone(),
+                    environment,
                     registry: state.config.registry.clone(),
                 };
 
@@ -182,4 +184,41 @@ fn sanitize(input: &str) -> String {
         }
     }
     out.trim_matches('-').to_lowercase()
+}
+
+fn app_environment(git_ref: &str, default_branch: &str) -> String {
+    let branch = branch_name(git_ref);
+    if !default_branch.is_empty() && branch == branch_name(default_branch) {
+        return "production".to_string();
+    }
+
+    sanitize(branch)
+}
+
+fn branch_name(git_ref: &str) -> &str {
+    git_ref.strip_prefix("refs/heads/").unwrap_or(git_ref)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::app_environment;
+
+    #[test]
+    fn app_environment_uses_production_for_default_branch() {
+        assert_eq!(app_environment("refs/heads/main", "main"), "production");
+        assert_eq!(app_environment("refs/heads/master", "master"), "production");
+        assert_eq!(
+            app_environment("refs/heads/trunk", "refs/heads/trunk"),
+            "production"
+        );
+    }
+
+    #[test]
+    fn app_environment_uses_branch_name_for_non_default_branch() {
+        assert_eq!(app_environment("refs/heads/master", "main"), "master");
+        assert_eq!(
+            app_environment("refs/heads/feature/foo", "main"),
+            "feature-foo"
+        );
+    }
 }

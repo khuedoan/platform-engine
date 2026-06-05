@@ -20,6 +20,7 @@
           cargo
           cargo-nextest
           clippy
+          fluxcd
           mdbook
           nixpacks
           openssl

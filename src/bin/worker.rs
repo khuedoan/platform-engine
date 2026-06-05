@@ -39,6 +39,7 @@ async fn main() -> Result<()> {
         }
         _ => worker_options
             .register_workflow::<workflows::push_to_deploy::PushToDeployWorkflow>()
+            .register_workflow::<workflows::gitops_publish::GitopsPublishWorkflow>()
             .build(),
     };
 

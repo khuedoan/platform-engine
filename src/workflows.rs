@@ -1,11 +1,12 @@
-use crate::workflows::{
-    forgejo_bootstrap::ForgejoBootstrapInput, push_to_deploy::PushToDeployInput,
+use crate::{
+    activities::UpdateGitopsImageInput,
+    workflows::{forgejo_bootstrap::ForgejoBootstrapInput, push_to_deploy::PushToDeployInput},
 };
 use anyhow::{Context, Result, ensure};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use temporalio_client::{
-    Client, NamespacedClient, WorkflowStartOptions, errors::WorkflowStartError,
-    grpc::WorkflowService, tonic::Code, tonic::IntoRequest,
+    Client, NamespacedClient, WorkflowStartOptions, WorkflowStartSignal,
+    errors::WorkflowStartError, grpc::WorkflowService, tonic::Code, tonic::IntoRequest,
 };
 use temporalio_common::{
     data_converters::SerializationContextData,
@@ -13,7 +14,7 @@ use temporalio_common::{
         coresdk::IntoPayloadsExt,
         temporal::api::{
             common::v1 as common_proto,
-            enums::v1::TaskQueueKind,
+            enums::v1::{TaskQueueKind, WorkflowIdConflictPolicy, WorkflowIdReusePolicy},
             schedule::v1 as schedule_proto,
             taskqueue::v1 as taskqueue_proto,
             workflow::v1 as workflow_proto,
@@ -26,6 +27,7 @@ use temporalio_common::{
 use tracing::{error, info, warn};
 
 pub mod forgejo_bootstrap;
+pub mod gitops_publish;
 mod options;
 pub mod push_to_deploy;
 
@@ -41,6 +43,35 @@ pub async fn start_workflow(client: &Client, id: String, input: PushToDeployInpu
             input,
             WorkflowStartOptions::new("main", id).build(),
         )
+        .await;
+
+    handle_start_result(result.map(|_| ()))
+}
+
+pub async fn signal_gitops_publish(
+    client: &Client,
+    id: String,
+    input: UpdateGitopsImageInput,
+) -> Result<()> {
+    let signal_input = client
+        .options()
+        .data_converter
+        .to_payloads(&SerializationContextData::Workflow, &input)
+        .await
+        .context("failed to encode GitOps publish signal")?
+        .into_payloads()
+        .context("GitOps publish signal encoded no payloads")?;
+    let signal = WorkflowStartSignal::new(gitops_publish::PUBLISH_SIGNAL)
+        .input(signal_input)
+        .build();
+    let options = WorkflowStartOptions::new("main", id)
+        .id_reuse_policy(WorkflowIdReusePolicy::AllowDuplicate)
+        .id_conflict_policy(WorkflowIdConflictPolicy::UseExisting)
+        .start_signal(signal)
+        .build();
+
+    let result = client
+        .start_workflow(gitops_publish::GitopsPublishWorkflow::run, (), options)
         .await;
 
     handle_start_result(result.map(|_| ()))

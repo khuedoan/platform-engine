@@ -9,17 +9,24 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use temporalio_sdk::activities::{ActivityContext, ActivityError};
 use tokio::{fs::remove_dir_all, process::Command};
+use tracing::info;
+
+const APPS_REPOSITORY: &str = "apps";
+const APPS_TAG: &str = "latest";
+const FLUX_NAMESPACE: &str = "flux-system";
+const SOURCE_INTERVAL: &str = "30s";
+const RECONCILE_INTERVAL: &str = "1m";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateGitopsImageInput {
     pub url: String,
     pub revision: String,
-    pub namespace: String,
-    pub app: String,
-    pub cluster: String,
+    pub tenant: String,
+    pub project: String,
+    pub environment: String,
     pub image: Image,
 }
 
@@ -27,6 +34,29 @@ pub struct UpdateGitopsImageInput {
 pub struct UpdateGitopsImageResult {
     pub changed: bool,
     pub commit_sha: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnqueueGitopsPublishInput {
+    pub workflow_id: String,
+    pub update: UpdateGitopsImageInput,
+}
+
+pub async fn enqueue_gitops_publish(
+    ctx: ActivityContext,
+    input: EnqueueGitopsPublishInput,
+) -> Result<(), ActivityError> {
+    if ctx.is_cancelled() {
+        return Err(ActivityError::cancelled());
+    }
+
+    ctx.record_heartbeat(vec![]);
+    let client = crate::temporal::get_client()
+        .await
+        .map_err(anyhow::Error::from)?;
+    crate::workflows::signal_gitops_publish(&client, input.workflow_id, input.update)
+        .await
+        .map_err(ActivityError::from)
 }
 
 pub async fn update_gitops_image(
@@ -44,9 +74,9 @@ pub async fn update_gitops_image(
     );
     let changed = update_app_version_inner(UpdateAppVersionInput {
         apps_dir: apps_dir.to_string_lossy().to_string(),
-        namespace: input.namespace.clone(),
-        app: input.app.clone(),
-        cluster: input.cluster.clone(),
+        tenant: input.tenant.clone(),
+        project: input.project.clone(),
+        environment: input.environment.clone(),
         new_images: vec![AppImageUpdate {
             repository,
             tag: input.image.tag.clone(),
@@ -54,40 +84,55 @@ pub async fn update_gitops_image(
     })
     .await?;
 
-    if !changed {
-        return Ok(UpdateGitopsImageResult {
-            changed: false,
-            commit_sha: None,
-        });
+    let mut commit_sha = None;
+    if changed {
+        commit_sha = Some(commit_and_push_gitops(&ctx, workspace.path(), &input).await?);
     }
 
-    let app_file_path = Path::new("apps")
-        .join(&input.namespace)
-        .join(&input.app)
-        .join(format!("{}.yaml", input.cluster));
-    let app_file_path = app_file_path.to_string_lossy().to_string();
+    let bundle_workspace = TempWorkspace::new("apps-bundle", &input.url, &input.revision);
+    let bundle = write_apps_bundle(
+        bundle_workspace.path(),
+        &apps_dir,
+        APPS_REPOSITORY,
+        APPS_TAG,
+        &input.image.registry,
+    )?;
+    push_apps_bundle(&ctx, &input.image.registry, &bundle).await?;
+
+    Ok(UpdateGitopsImageResult {
+        changed,
+        commit_sha,
+    })
+}
+
+async fn commit_and_push_gitops(
+    ctx: &ActivityContext,
+    workspace: &Path,
+    input: &UpdateGitopsImageInput,
+) -> Result<String, ActivityError> {
+    let app_path = Path::new("apps")
+        .join(&input.tenant)
+        .join(&input.project)
+        .join(&input.environment);
+    let app_path = app_path.to_string_lossy().to_string();
 
     let mut command = Command::new("git");
-    command
-        .args(["add", &app_file_path])
-        .current_dir(workspace.path());
-    run_checked_command(&ctx, &mut command, "git add app version").await?;
+    command.args(["add", &app_path]).current_dir(workspace);
+    run_checked_command(ctx, &mut command, "git add app version").await?;
 
     let commit_message = format!(
-        "chore({}/{}): update {} version",
-        input.namespace, input.app, input.cluster
+        "chore({}/{}): update {} image",
+        input.tenant, input.project, input.environment
     );
     let mut command = Command::new("git");
     command
         .args(["commit", "-m", &commit_message])
-        .current_dir(workspace.path());
-    run_checked_command(&ctx, &mut command, "git commit app version").await?;
+        .current_dir(workspace);
+    run_checked_command(ctx, &mut command, "git commit app version").await?;
 
     let mut command = Command::new("git");
-    command
-        .args(["rev-parse", "HEAD"])
-        .current_dir(workspace.path());
-    let commit_sha = run_stdout_command(&ctx, &mut command, "git rev-parse HEAD").await?;
+    command.args(["rev-parse", "HEAD"]).current_dir(workspace);
+    let commit_sha = run_stdout_command(ctx, &mut command, "git rev-parse HEAD").await?;
 
     let git_username = env::var("GIT_USERNAME").unwrap_or_else(|_| "git".to_string());
     let git_password = env::var("GIT_PASSWORD").unwrap_or_else(|_| "password".to_string());
@@ -95,13 +140,10 @@ pub async fn update_gitops_image(
     let branch_ref = format!("HEAD:{}", input.revision);
     command
         .args(["push", "origin", &branch_ref])
-        .current_dir(workspace.path());
-    run_checked_command(&ctx, &mut command, "git push app version").await?;
+        .current_dir(workspace);
+    run_checked_command(ctx, &mut command, "git push app version").await?;
 
-    Ok(UpdateGitopsImageResult {
-        changed: true,
-        commit_sha: Some(commit_sha),
-    })
+    Ok(commit_sha)
 }
 
 async fn clone_repo(
@@ -152,30 +194,315 @@ pub struct AppImageUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateAppVersionInput {
     pub apps_dir: String,
-    pub namespace: String,
-    pub app: String,
-    pub cluster: String,
+    pub tenant: String,
+    pub project: String,
+    pub environment: String,
     pub new_images: Vec<AppImageUpdate>,
 }
 
 pub async fn update_app_version_inner(input: UpdateAppVersionInput) -> anyhow::Result<bool> {
-    let values_path = Path::new(&input.apps_dir)
-        .join(&input.namespace)
-        .join(&input.app)
-        .join(format!("{}.yaml", input.cluster));
-
-    let mut doc: YamlValue = serde_yaml::from_reader(fs::File::open(&values_path)?)?;
-
+    let app_dir = Path::new(&input.apps_dir)
+        .join(&input.tenant)
+        .join(&input.project)
+        .join(&input.environment);
     let mut changed = false;
-    update_image_tags_recursive(&mut doc, &input.new_images, &mut changed);
 
-    if changed {
-        let writer = fs::File::create(&values_path)?;
-        let mut ser = serde_yaml::Serializer::new(writer);
-        doc.serialize(&mut ser)?;
+    for entry in fs::read_dir(&app_dir)? {
+        let path = entry?.path();
+        if !is_yaml_file(&path) {
+            continue;
+        }
+
+        let mut doc: YamlValue = serde_yaml::from_reader(fs::File::open(&path)?)?;
+        let mut file_changed = false;
+        update_image_tags_recursive(&mut doc, &input.new_images, &mut file_changed);
+
+        if file_changed {
+            let writer = fs::File::create(&path)?;
+            let mut ser = serde_yaml::Serializer::new(writer);
+            doc.serialize(&mut ser)?;
+            changed = true;
+        }
     }
 
     Ok(changed)
+}
+
+fn is_yaml_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "yaml" | "yml"))
+}
+
+#[derive(Debug)]
+struct AppsBundle {
+    apps: Vec<AppArtifact>,
+    count: usize,
+    root_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct AppArtifact {
+    dir: PathBuf,
+    name: String,
+    repository: String,
+}
+
+fn write_apps_bundle(
+    output_dir: &Path,
+    source_dir: &Path,
+    repository: &str,
+    tag: &str,
+    registry: &str,
+) -> anyhow::Result<AppsBundle> {
+    fs::create_dir_all(output_dir)?;
+
+    let mut apps = Vec::new();
+    let mut count = 0;
+    for (tenant, tenant_dir) in child_dirs(source_dir)? {
+        for (project, project_dir) in child_dirs(&tenant_dir)? {
+            for (environment, environment_dir) in child_dirs(&project_dir)? {
+                let app_env = format!("{tenant}/{project}/{environment}");
+                let app = app_artifact(output_dir, repository, &app_env);
+                let manifest_count = copy_app_manifests(&environment_dir, &app.dir)?;
+                if manifest_count > 0 {
+                    write_namespace(&app.dir, &app.name)?;
+                    count += manifest_count;
+                    apps.push(app);
+                }
+            }
+        }
+    }
+
+    if count == 0 {
+        return Err(anyhow!(
+            "no app manifests found in {}",
+            source_dir.display()
+        ));
+    }
+
+    let root_dir = output_dir.join("root");
+    write_root_bundle(&root_dir, &apps, tag, registry)?;
+
+    Ok(AppsBundle {
+        apps,
+        count,
+        root_dir,
+    })
+}
+
+fn child_dirs(path: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let mut dirs = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|name| anyhow!("{} is not valid UTF-8", name.to_string_lossy()))?;
+        dirs.push((name, entry.path()));
+    }
+    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(dirs)
+}
+
+fn copy_app_manifests(source_dir: &Path, output_dir: &Path) -> anyhow::Result<usize> {
+    let mut count = 0;
+    for entry in fs::read_dir(source_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            return Err(anyhow!(
+                "{}: nested app manifest directories are not supported",
+                path.display()
+            ));
+        }
+        if !is_yaml_file(&path) {
+            continue;
+        }
+        if is_kustomization(&path) {
+            return Err(anyhow!(
+                "{} is not supported; put plain Kubernetes YAML in apps instead",
+                path.display()
+            ));
+        }
+
+        let output_path = output_dir.join(entry.file_name());
+        fs::create_dir_all(output_dir)?;
+        fs::copy(&path, output_path)?;
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+fn app_artifact(output_dir: &Path, repository: &str, app_env: &str) -> AppArtifact {
+    let name = app_env.replace('/', "-");
+    AppArtifact {
+        dir: output_dir.join("apps").join(app_env),
+        name,
+        repository: format!("{repository}/{app_env}"),
+    }
+}
+
+fn write_namespace(output_dir: &Path, name: &str) -> anyhow::Result<()> {
+    write_file(
+        &output_dir.join("namespace.yaml"),
+        &format!(
+            r#"apiVersion: v1
+kind: Namespace
+metadata:
+  name: {name}
+  labels:
+    istio.io/dataplane-mode: ambient
+"#
+        ),
+    )
+}
+
+fn write_root_bundle(
+    output_dir: &Path,
+    apps: &[AppArtifact],
+    tag: &str,
+    registry: &str,
+) -> anyhow::Result<()> {
+    fs::create_dir_all(output_dir)?;
+
+    for app in apps {
+        write_file(
+            &output_dir.join(format!("ocirepository-{}.yaml", app.name)),
+            &format!(
+                r#"apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  interval: {source_interval}
+  url: oci://{registry}/{repository}
+  insecure: true
+  ref:
+    tag: {tag}
+"#,
+                name = app.name,
+                namespace = FLUX_NAMESPACE,
+                source_interval = SOURCE_INTERVAL,
+                registry = registry,
+                repository = app.repository,
+                tag = tag,
+            ),
+        )?;
+
+        write_file(
+            &output_dir.join(format!("kustomization-{}.yaml", app.name)),
+            &format!(
+                r#"apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: {name}
+  namespace: {namespace}
+spec:
+  interval: {reconcile_interval}
+  dependsOn:
+    - name: platform
+  path: .
+  prune: true
+  targetNamespace: {name}
+  sourceRef:
+    kind: OCIRepository
+    name: {name}
+"#,
+                name = app.name,
+                namespace = FLUX_NAMESPACE,
+                reconcile_interval = RECONCILE_INTERVAL,
+            ),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn write_file(path: &Path, content: &str) -> anyhow::Result<()> {
+    fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?,
+    )?;
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn is_kustomization(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "kustomization.yaml" | "kustomization.yml"))
+}
+
+async fn push_apps_bundle(
+    ctx: &ActivityContext,
+    registry: &str,
+    bundle: &AppsBundle,
+) -> Result<(), ActivityError> {
+    info!(
+        artifacts = bundle.apps.len() + 1,
+        manifests = bundle.count,
+        "pushing apps OCI artifacts"
+    );
+
+    for app in &bundle.apps {
+        push_flux_artifact(
+            ctx,
+            registry,
+            &app.repository,
+            APPS_TAG,
+            &app.name,
+            &app.dir,
+        )
+        .await?;
+    }
+    push_flux_artifact(
+        ctx,
+        registry,
+        APPS_REPOSITORY,
+        APPS_TAG,
+        APPS_REPOSITORY,
+        &bundle.root_dir,
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn push_flux_artifact(
+    ctx: &ActivityContext,
+    registry: &str,
+    repository: &str,
+    revision: &str,
+    source: &str,
+    path: &Path,
+) -> Result<(), ActivityError> {
+    let artifact_url = format!("oci://{registry}/{repository}:{revision}");
+    let path = path.to_string_lossy().to_string();
+
+    info!(artifact = %artifact_url, path = %path, "pushing Flux OCI artifact");
+
+    let mut command = Command::new("flux");
+    command.args([
+        "push",
+        "artifact",
+        &artifact_url,
+        "--path",
+        &path,
+        "--source",
+        source,
+        "--revision",
+        revision,
+        "--insecure-registry",
+    ]);
+    run_checked_command(ctx, &mut command, "flux push artifact").await?;
+
+    Ok(())
 }
 
 fn update_image_tags_recursive(
@@ -185,23 +512,12 @@ fn update_image_tags_recursive(
 ) {
     match node {
         YamlValue::Mapping(map) => {
-            if let Some(YamlValue::Mapping(image_map)) =
-                map.get_mut(YamlValue::String("image".to_string()))
-            {
-                let repo_key = YamlValue::String("repository".to_string());
-                let tag_key = YamlValue::String("tag".to_string());
-                let (repo_opt, tag_opt) = (
-                    image_map.get(&repo_key).cloned(),
-                    image_map.get(&tag_key).cloned(),
-                );
-                if let (Some(YamlValue::String(repo_str)), Some(YamlValue::String(tag_str))) =
-                    (repo_opt, tag_opt)
-                {
-                    for img in new_images {
-                        if repo_str == img.repository && tag_str != img.tag {
-                            image_map.insert(tag_key.clone(), YamlValue::String(img.tag.clone()));
-                            *changed = true;
-                        }
+            let image_key = YamlValue::String("image".to_string());
+            if let Some(YamlValue::String(image)) = map.get_mut(&image_key) {
+                for img in new_images {
+                    if let Some(updated) = update_image_reference(image, img) {
+                        *image = updated;
+                        *changed = true;
                     }
                 }
             }
@@ -222,27 +538,55 @@ fn update_image_tags_recursive(
     }
 }
 
+fn update_image_reference(current: &str, image: &AppImageUpdate) -> Option<String> {
+    let tag_prefix = format!("{}:", image.repository);
+    let digest_prefix = format!("{}@", image.repository);
+
+    if current.starts_with(&tag_prefix) || current.starts_with(&digest_prefix) {
+        let updated = format!("{}:{}", image.repository, image.tag);
+        if current != updated {
+            return Some(updated);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
 
-    fn copy_dir_recursive(src: &Path, dst: &Path) {
-        if !dst.exists() {
-            fs::create_dir_all(dst).unwrap();
-        }
-        for entry in fs::read_dir(src).unwrap() {
-            let entry = entry.unwrap();
-            let file_type = entry.file_type().unwrap();
-            let src_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
-            if file_type.is_dir() {
-                copy_dir_recursive(&src_path, &dst_path);
-            } else {
-                fs::copy(&src_path, &dst_path).unwrap();
-            }
-        }
+    fn write_app_fixture(root: &Path, image: &str) {
+        let app_dir = root.join("khuedoan").join("blog").join("production");
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(
+            app_dir.join("deployment-blog.yaml"),
+            format!(
+                r#"apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blog
+spec:
+  template:
+    spec:
+      containers:
+        - name: blog
+          image: {image}
+"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            app_dir.join("service-blog.yaml"),
+            r#"apiVersion: v1
+kind: Service
+metadata:
+  name: blog
+"#,
+        )
+        .unwrap();
     }
 
     #[tokio::test]
@@ -250,13 +594,13 @@ mod tests {
         let tmp = PathBuf::from("/tmp/test-cloudlab-apps-1");
         let _ = tokio::fs::remove_dir_all(&tmp).await;
         tokio::fs::create_dir_all(&tmp).await.unwrap();
-        copy_dir_recursive(Path::new("testdata/cloudlab/apps"), &tmp);
+        write_app_fixture(&tmp, "docker.io/khuedoan/blog:old-tag");
 
         let changed = update_app_version_inner(UpdateAppVersionInput {
             apps_dir: tmp.to_string_lossy().to_string(),
-            namespace: "khuedoan".to_string(),
-            app: "blog".to_string(),
-            cluster: "production".to_string(),
+            tenant: "khuedoan".to_string(),
+            project: "blog".to_string(),
+            environment: "production".to_string(),
             new_images: vec![AppImageUpdate {
                 repository: "docker.io/khuedoan/blog".to_string(),
                 tag: "test-tag-123".to_string(),
@@ -266,6 +610,9 @@ mod tests {
         .unwrap();
 
         assert!(changed);
+        let deployment =
+            fs::read_to_string(tmp.join("khuedoan/blog/production/deployment-blog.yaml")).unwrap();
+        assert!(deployment.contains("image: docker.io/khuedoan/blog:test-tag-123"));
     }
 
     #[tokio::test]
@@ -273,13 +620,16 @@ mod tests {
         let tmp = PathBuf::from("/tmp/test-cloudlab-apps-2");
         let _ = tokio::fs::remove_dir_all(&tmp).await;
         tokio::fs::create_dir_all(&tmp).await.unwrap();
-        copy_dir_recursive(Path::new("testdata/cloudlab/apps"), &tmp);
+        write_app_fixture(
+            &tmp,
+            "docker.io/khuedoan/blog:6fbd90b77a81e0bcb330fddaa230feff744a7010",
+        );
 
         let changed = update_app_version_inner(UpdateAppVersionInput {
             apps_dir: tmp.to_string_lossy().to_string(),
-            namespace: "khuedoan".to_string(),
-            app: "blog".to_string(),
-            cluster: "production".to_string(),
+            tenant: "khuedoan".to_string(),
+            project: "blog".to_string(),
+            environment: "production".to_string(),
             new_images: vec![AppImageUpdate {
                 repository: "docker.io/khuedoan/blog".to_string(),
                 tag: "6fbd90b77a81e0bcb330fddaa230feff744a7010".to_string(),
@@ -289,5 +639,43 @@ mod tests {
         .unwrap();
 
         assert!(!changed);
+    }
+
+    #[test]
+    fn test_write_apps_bundle() {
+        let source = PathBuf::from("/tmp/test-cloudlab-apps-bundle-source");
+        let output = PathBuf::from("/tmp/test-cloudlab-apps-bundle-output");
+        let _ = fs::remove_dir_all(&source);
+        let _ = fs::remove_dir_all(&output);
+        write_app_fixture(&source, "docker.io/khuedoan/blog:test-tag");
+
+        let bundle = write_apps_bundle(
+            &output,
+            &source,
+            "apps",
+            "latest",
+            "registry.registry.svc.cluster.local",
+        )
+        .unwrap();
+
+        assert_eq!(bundle.count, 2);
+        assert_eq!(bundle.apps[0].name, "khuedoan-blog-production");
+        assert!(
+            output
+                .join("apps/khuedoan/blog/production/namespace.yaml")
+                .exists()
+        );
+        assert!(
+            fs::read_to_string(output.join("root/ocirepository-khuedoan-blog-production.yaml"))
+                .unwrap()
+                .contains(
+                    "url: oci://registry.registry.svc.cluster.local/apps/khuedoan/blog/production"
+                )
+        );
+        assert!(
+            fs::read_to_string(output.join("root/kustomization-khuedoan-blog-production.yaml"))
+                .unwrap()
+                .contains("targetNamespace: khuedoan-blog-production")
+        );
     }
 }
