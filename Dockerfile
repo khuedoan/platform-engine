@@ -16,6 +16,7 @@ COPY . .
 RUN RUSTFLAGS='-C target-feature=+crt-static' cargo build --release --target "$(uname -m)-unknown-linux-gnu"
 RUN cp "/src/target/$(uname -m)-unknown-linux-gnu/release/worker" /usr/local/bin/worker
 RUN cp "/src/target/$(uname -m)-unknown-linux-gnu/release/server" /usr/local/bin/server
+RUN cp "/src/target/$(uname -m)-unknown-linux-gnu/release/netamos" /usr/local/bin/netamos
 
 FROM nixos/nix:latest
 
@@ -32,5 +33,6 @@ RUN nix-env --install --quiet --attr \
 
 COPY --from=builder /usr/local/bin/worker /usr/local/bin/worker
 COPY --from=builder /usr/local/bin/server /usr/local/bin/server
+COPY --from=builder /usr/local/bin/netamos /usr/local/bin/netamos
 
 CMD [ "/usr/local/bin/worker" ]

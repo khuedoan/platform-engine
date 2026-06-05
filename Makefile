@@ -5,6 +5,9 @@ default: build
 build:
 	cargo build --release
 
+install: build
+	cp ./target/release/netamos ~/.local/bin/netamos
+
 dev:
 	docker compose up --detach
 	bacon run
