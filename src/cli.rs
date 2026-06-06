@@ -13,6 +13,7 @@ use crate::api::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
+use comfy_table::{Attribute, Cell, ContentArrangement, Table, presets::NOTHING};
 use openidconnect::{
     AdditionalProviderMetadata, AuthType, ClientId, DeviceAuthorizationUrl, IssuerUrl, Nonce,
     OAuth2TokenResponse, ProviderMetadata, Scope, TokenResponse as OidcTokenResponse,
@@ -43,11 +44,17 @@ enum Commands {
     Login,
     Logout,
     Whoami,
-    List,
+    List(ListArgs),
     Create(CreateArgs),
     Deploy(DeployArgs),
     Status(StatusArgs),
     Open(OpenArgs),
+}
+
+#[derive(Args)]
+struct ListArgs {
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -167,17 +174,13 @@ pub async fn run() -> Result<()> {
             println!("{}", user.username.or(user.email).unwrap_or(user.subject));
             Ok(())
         }
-        Commands::List => {
+        Commands::List(args) => {
             let api = ApiSession::load(&http, cli.server)?;
             let projects: Vec<ProjectSummary> = api.get("/api/v1/projects").await?;
-            for project in projects {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    project.tenant,
-                    project.project,
-                    project.environment,
-                    project.hostnames.join(",")
-                );
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&projects)?);
+            } else {
+                print_projects(&projects);
             }
             Ok(())
         }
@@ -472,6 +475,27 @@ fn print_workflow_status(status: &WorkflowStatus) {
     } else {
         println!("{}\t{}", status.workflow_id, status.status);
     }
+}
+
+fn print_projects(projects: &[ProjectSummary]) {
+    let header = ["TENANT", "PROJECT", "ENV", "DOMAINS"]
+        .map(|title| Cell::new(title).add_attribute(Attribute::Bold));
+    let mut table = Table::new();
+    table
+        .load_preset(NOTHING)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(header);
+
+    for project in projects {
+        table.add_row([
+            project.tenant.as_str(),
+            project.project.as_str(),
+            project.environment.as_str(),
+            &project.hostnames.join(", "),
+        ]);
+    }
+
+    println!("{table}");
 }
 
 fn server_credentials(server: Option<String>) -> Result<(String, ServerCredentials)> {

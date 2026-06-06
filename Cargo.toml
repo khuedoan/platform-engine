@@ -13,6 +13,7 @@ temporalio-sdk-core = "0.4"
 anyhow = "1"
 axum = { version = "0.8", features = ["macros", "json"] }
 clap = { version = "4", features = ["derive", "env"] }
+comfy-table = "7"
 futures = "0.3"
 futures-util = "0.3"
 openidconnect = "4"
