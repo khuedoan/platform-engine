@@ -5,8 +5,8 @@ use super::{
         required_string,
     },
 };
-use serde_yaml::Value as YamlValue;
 use std::{collections::BTreeSet, fs, path::Path};
+use yaml_serde::Value as YamlValue;
 
 const SOURCE_IMAGE_REPOSITORY: &str = "apps";
 

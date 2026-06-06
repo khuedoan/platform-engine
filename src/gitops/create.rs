@@ -256,7 +256,7 @@ fn key_values(values: &[KeyValue]) -> serde_json::Map<String, JsonValue> {
 }
 
 fn write_json_manifest(path: &Path, value: JsonValue) -> anyhow::Result<()> {
-    let manifest = serde_yaml::to_value(value)?;
+    let manifest = yaml_serde::to_value(value)?;
     validate_app_manifest(path, &manifest)?;
     write_yaml_manifest(path, &manifest)
 }

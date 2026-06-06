@@ -4,8 +4,8 @@ use super::{
         child_dirs, is_kustomization, is_yaml_file, read_app_manifest, write_yaml_manifest,
     },
 };
-use serde_yaml::Value as YamlValue;
 use std::{fs, path::Path};
+use yaml_serde::Value as YamlValue;
 
 pub(crate) async fn update_app_version_inner(input: UpdateAppVersionInput) -> anyhow::Result<bool> {
     let apps_dir = Path::new(&input.apps_dir);

@@ -1,10 +1,10 @@
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value as YamlValue;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
+use yaml_serde::Value as YamlValue;
 
 const NAMESPACE_KIND: &str = "Namespace";
 const NAMESPACE_FILENAME: &str = "namespace.yaml";
@@ -34,7 +34,7 @@ pub(crate) fn child_dirs(path: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> 
 
 pub(crate) fn read_app_manifest(path: &Path) -> anyhow::Result<YamlValue> {
     let mut manifest = None;
-    for document in serde_yaml::Deserializer::from_reader(fs::File::open(path)?) {
+    for document in yaml_serde::Deserializer::from_reader(fs::File::open(path)?) {
         let value = YamlValue::deserialize(document)?;
         if is_empty_yaml_document(&value) {
             continue;
@@ -140,16 +140,16 @@ fn is_empty_yaml_document(value: &YamlValue) -> bool {
 }
 
 pub(crate) fn required_mapping<'a>(
-    map: &'a serde_yaml::Mapping,
+    map: &'a yaml_serde::Mapping,
     key: &str,
-) -> Option<&'a serde_yaml::Mapping> {
+) -> Option<&'a yaml_serde::Mapping> {
     match map.get(YamlValue::String(key.to_string())) {
         Some(YamlValue::Mapping(value)) => Some(value),
         _ => None,
     }
 }
 
-pub(crate) fn required_string<'a>(map: &'a serde_yaml::Mapping, key: &str) -> Option<&'a str> {
+pub(crate) fn required_string<'a>(map: &'a yaml_serde::Mapping, key: &str) -> Option<&'a str> {
     match map.get(YamlValue::String(key.to_string())) {
         Some(YamlValue::String(value)) if !value.is_empty() => Some(value),
         _ => None,
@@ -185,7 +185,7 @@ pub(crate) fn write_yaml_manifest(path: &Path, manifest: &YamlValue) -> anyhow::
             .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?,
     )?;
     let writer = fs::File::create(path)?;
-    let mut serializer = serde_yaml::Serializer::new(writer);
+    let mut serializer = yaml_serde::Serializer::new(writer);
     manifest.serialize(&mut serializer)?;
     Ok(())
 }
