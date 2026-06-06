@@ -9,14 +9,14 @@ use std::{
 use crate::api::{
     AuthConfig, CreateAppRequest, CreateDeployment, CreateHttpRoute, CreatePostgres, CreateService,
     CreateVolume, DeleteAppRequest, DeployRequest, KeyValue, ProjectSummary, UserInfo,
-    WorkflowStarted, WorkflowStatus,
+    WorkflowStarted, WorkflowStatus, deploy_workflow_id,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use comfy_table::{Attribute, Cell, ContentArrangement, Table, presets::NOTHING};
 use openidconnect::{
     AdditionalProviderMetadata, AuthType, ClientId, DeviceAuthorizationUrl, IssuerUrl, Nonce,
-    OAuth2TokenResponse, ProviderMetadata, Scope, TokenResponse as OidcTokenResponse,
+    OAuth2TokenResponse, ProviderMetadata, RefreshToken, Scope, TokenResponse as OidcTokenResponse,
     core::{
         CoreAuthDisplay, CoreClaimName, CoreClaimType, CoreClient, CoreClientAuthMethod,
         CoreDeviceAuthorizationResponse, CoreGrantType, CoreJsonWebKey,
@@ -122,8 +122,13 @@ struct DeployArgs {
 
 #[derive(Args)]
 struct StatusArgs {
-    workflow_id: String,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "REV",
+        help = "Git revision to check; defaults to HEAD"
+    )]
+    commit: Option<String>,
+    #[arg(long, help = "Poll until the deployment workflow finishes")]
     watch: bool,
 }
 
@@ -182,13 +187,13 @@ pub async fn run() -> Result<()> {
         Commands::Login => login(&http, cli.server).await,
         Commands::Logout => logout(cli.server),
         Commands::Whoami => {
-            let api = ApiSession::load(&http, cli.server)?;
+            let api = ApiSession::load(&http, cli.server).await?;
             let user: UserInfo = api.get("/api/v1/me").await?;
             println!("{}", user.username.or(user.email).unwrap_or(user.subject));
             Ok(())
         }
         Commands::List(args) => {
-            let api = ApiSession::load(&http, cli.server)?;
+            let api = ApiSession::load(&http, cli.server).await?;
             let projects: Vec<ProjectSummary> = api.get("/api/v1/projects").await?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&projects)?);
@@ -199,7 +204,7 @@ pub async fn run() -> Result<()> {
         }
         Commands::Create(args) => {
             let (request, watch) = create_request(args)?;
-            let api = ApiSession::load(&http, cli.server)?;
+            let api = ApiSession::load(&http, cli.server).await?;
             let started: WorkflowStarted = api.post("/api/v1/apps", &request).await?;
             println!("{}", started.workflow_id);
             if watch {
@@ -209,7 +214,7 @@ pub async fn run() -> Result<()> {
         }
         Commands::Delete(args) => {
             let (request, watch) = delete_request(args)?;
-            let api = ApiSession::load(&http, cli.server)?;
+            let api = ApiSession::load(&http, cli.server).await?;
             let path = format!(
                 "/api/v1/apps/{}/{}/{}",
                 request.tenant, request.project, request.environment
@@ -224,7 +229,7 @@ pub async fn run() -> Result<()> {
         Commands::Deploy(args) => {
             let watch = args.watch;
             let request = deploy_request(args)?;
-            let api = ApiSession::load(&http, cli.server)?;
+            let api = ApiSession::load(&http, cli.server).await?;
             let started: WorkflowStarted = api.post("/api/v1/deployments", &request).await?;
             println!("{}", started.workflow_id);
             if watch {
@@ -233,17 +238,21 @@ pub async fn run() -> Result<()> {
             Ok(())
         }
         Commands::Status(args) => {
-            let api = ApiSession::load(&http, cli.server)?;
+            let commit = git_commit(args.commit.as_deref())?;
+            let repo = repo_from_git_remote()?;
+            let repo_name = repo_name_from_slug(&repo)?;
+            let workflow_id = deploy_workflow_id(repo_name, &commit);
+            let api = ApiSession::load(&http, cli.server).await?;
             if args.watch {
-                api.watch_workflow(&args.workflow_id).await
+                api.watch_commit_workflow(&commit, &workflow_id).await
             } else {
-                let status = api.workflow_status(&args.workflow_id).await?;
-                print_workflow_status(&status);
+                let status = api.workflow_status(&workflow_id).await?;
+                print_commit_status(&commit, &status);
                 Ok(())
             }
         }
         Commands::Open(args) => {
-            let api = ApiSession::load(&http, cli.server)?;
+            let api = ApiSession::load(&http, cli.server).await?;
             let status = api.workflow_status(&args.workflow_id).await?;
             let url = status
                 .url
@@ -262,8 +271,8 @@ struct ApiSession<'a> {
 }
 
 impl<'a> ApiSession<'a> {
-    fn load(http: &'a Client, server: Option<String>) -> Result<Self> {
-        let (server, credentials) = server_credentials(server)?;
+    async fn load(http: &'a Client, server: Option<String>) -> Result<Self> {
+        let (server, credentials) = server_credentials(http, server).await?;
         Ok(Self {
             http,
             server,
@@ -320,6 +329,20 @@ impl<'a> ApiSession<'a> {
             sleep(Duration::from_secs(5)).await;
         }
     }
+
+    async fn watch_commit_workflow(&self, commit: &str, workflow_id: &str) -> Result<()> {
+        loop {
+            let status = self.workflow_status(workflow_id).await?;
+            print_commit_status(commit, &status);
+            if status.is_terminal() {
+                if status.status == "completed" {
+                    return Ok(());
+                }
+                bail!("workflow ended with status {}", status.status);
+            }
+            sleep(Duration::from_secs(5)).await;
+        }
+    }
 }
 
 async fn login(http: &Client, server: Option<String>) -> Result<()> {
@@ -330,6 +353,10 @@ async fn login(http: &Client, server: Option<String>) -> Result<()> {
             .context("set --server or NETAMOS_URL for the first login")?,
     );
     let auth: AuthConfig = public_api(http, &server, "/api/v1/auth/config").await?;
+    let trusted_audience = auth
+        .audience
+        .clone()
+        .or_else(|| trusted_audience_from_scopes(&auth.scopes));
     let oidc_http = oidc_http_client()?;
     let provider =
         DeviceProviderMetadata::discover_async(IssuerUrl::new(auth.issuer)?, &oidc_http).await?;
@@ -362,8 +389,12 @@ async fn login(http: &Client, server: Option<String>) -> Result<()> {
         .id_token()
         .context("issuer did not return an ID token")?
         .to_owned();
+    let mut verifier = client.id_token_verifier();
+    if let Some(audience) = trusted_audience {
+        verifier = verifier.set_other_audience_verifier_fn(move |aud| **aud == audience);
+    }
     id_token
-        .claims(&client.id_token_verifier(), no_nonce)
+        .claims(&verifier, no_nonce)
         .context("validate ID token")?;
 
     credentials.default_server = Some(server.clone());
@@ -387,6 +418,13 @@ fn oidc_http_client() -> Result<oidc_reqwest::Client> {
     Ok(oidc_reqwest::ClientBuilder::new()
         .redirect(oidc_reqwest::redirect::Policy::none())
         .build()?)
+}
+
+fn trusted_audience_from_scopes(scopes: &[String]) -> Option<String> {
+    scopes
+        .iter()
+        .find_map(|scope| scope.strip_prefix("audience:server:client_id:"))
+        .map(ToString::to_string)
 }
 
 fn no_nonce(nonce: Option<&Nonce>) -> std::result::Result<(), String> {
@@ -511,11 +549,31 @@ fn delete_request(args: DeleteArgs) -> Result<(DeleteAppRequest, bool)> {
     Ok((request, args.watch))
 }
 
+fn git_commit(commit: Option<&str>) -> Result<String> {
+    git_output(["rev-parse", commit.unwrap_or("HEAD")])
+}
+
+fn repo_name_from_slug(repo: &str) -> Result<&str> {
+    repo.rsplit('/')
+        .next()
+        .filter(|repo| !repo.is_empty())
+        .ok_or_else(|| anyhow!("repo must be in owner/name form"))
+}
+
 fn print_workflow_status(status: &WorkflowStatus) {
     if let Some(url) = &status.url {
         println!("{}\t{}\t{}", status.workflow_id, status.status, url);
     } else {
         println!("{}\t{}", status.workflow_id, status.status);
+    }
+}
+
+fn print_commit_status(commit: &str, status: &WorkflowStatus) {
+    let commit = commit.chars().take(12).collect::<String>();
+    if let Some(url) = &status.url {
+        println!("{commit}\t{}\t{url}", status.status);
+    } else {
+        println!("{commit}\t{}", status.status);
     }
 }
 
@@ -540,8 +598,11 @@ fn print_projects(projects: &[ProjectSummary]) {
     println!("{table}");
 }
 
-fn server_credentials(server: Option<String>) -> Result<(String, ServerCredentials)> {
-    let credentials = load_credentials()?;
+async fn server_credentials(
+    http: &Client,
+    server: Option<String>,
+) -> Result<(String, ServerCredentials)> {
+    let mut credentials = load_credentials()?;
     let server = normalize_server(
         server
             .or(credentials.default_server.clone())
@@ -552,7 +613,73 @@ fn server_credentials(server: Option<String>) -> Result<(String, ServerCredentia
         .get(&server)
         .cloned()
         .ok_or_else(|| anyhow!("run netamos login for {server}"))?;
+    if !token_needs_refresh(&token) {
+        return Ok((server, token));
+    }
+
+    let token = refresh_credentials(http, &server, &token).await?;
+    credentials.servers.insert(server.clone(), token.clone());
+    save_credentials(&credentials)?;
     Ok((server, token))
+}
+
+fn token_needs_refresh(credentials: &ServerCredentials) -> bool {
+    credentials
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= now_seconds().saturating_add(60))
+}
+
+async fn refresh_credentials(
+    http: &Client,
+    server: &str,
+    credentials: &ServerCredentials,
+) -> Result<ServerCredentials> {
+    let refresh_token = credentials
+        .refresh_token
+        .clone()
+        .ok_or_else(|| anyhow!("session expired; run netamos login for {server}"))?;
+    let auth: AuthConfig = public_api(http, server, "/api/v1/auth/config").await?;
+    let trusted_audience = auth
+        .audience
+        .clone()
+        .or_else(|| trusted_audience_from_scopes(&auth.scopes));
+    let oidc_http = oidc_http_client()?;
+    let provider =
+        DeviceProviderMetadata::discover_async(IssuerUrl::new(auth.issuer)?, &oidc_http).await?;
+    let device_authorization_endpoint = provider
+        .additional_metadata()
+        .device_authorization_endpoint
+        .clone();
+    let client = CoreClient::from_provider_metadata(provider, ClientId::new(auth.client_id), None)
+        .set_device_authorization_url(device_authorization_endpoint)
+        .set_auth_type(AuthType::RequestBody);
+
+    let token = client
+        .exchange_refresh_token(&RefreshToken::new(refresh_token.clone()))?
+        .request_async(&oidc_http)
+        .await?;
+    let id_token = token
+        .id_token()
+        .context("issuer did not return an ID token")?
+        .to_owned();
+    let mut verifier = client.id_token_verifier();
+    if let Some(audience) = trusted_audience {
+        verifier = verifier.set_other_audience_verifier_fn(move |aud| **aud == audience);
+    }
+    id_token
+        .claims(&verifier, no_nonce)
+        .context("validate refreshed ID token")?;
+
+    Ok(ServerCredentials {
+        id_token: id_token.to_string(),
+        refresh_token: token
+            .refresh_token()
+            .map(|refresh_token| refresh_token.secret().to_string())
+            .or(Some(refresh_token)),
+        expires_at: token
+            .expires_in()
+            .map(|expires| now_seconds() + expires.as_secs()),
+    })
 }
 
 fn load_credentials() -> Result<CredentialsFile> {

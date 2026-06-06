@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct AuthConfig {
     pub issuer: String,
     pub client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
     pub scopes: Vec<String>,
 }
 
@@ -211,6 +213,26 @@ pub struct DeployRequest {
     pub environment: String,
 }
 
+pub fn deploy_workflow_id(repo_name: &str, revision: &str) -> String {
+    format!(
+        "push-to-deploy-{}-{}",
+        sanitize_workflow_part(repo_name),
+        revision.chars().take(12).collect::<String>()
+    )
+}
+
+fn sanitize_workflow_part(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            out.push(ch);
+        } else if ch.is_whitespace() || ch == '/' {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +281,13 @@ mod tests {
 
         request.validate().unwrap();
         assert_eq!(request.app_path(), "test/example/production");
+    }
+
+    #[test]
+    fn deploy_workflow_id_matches_push_convention() {
+        assert_eq!(
+            deploy_workflow_id("example-service", "6c1c137dc62d1234567890"),
+            "push-to-deploy-example-service-6c1c137dc62d"
+        );
     }
 }

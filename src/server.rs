@@ -12,7 +12,7 @@ use crate::{
     activities::{ForgejoCommitStatusTarget, git_command_for_url},
     api::{
         AuthConfig as ApiAuthConfig, CreateAppRequest, DeleteAppRequest, DeployRequest,
-        ProjectSummary, UserInfo, WorkflowStarted, WorkflowStatus,
+        ProjectSummary, UserInfo, WorkflowStarted, WorkflowStatus, deploy_workflow_id,
     },
     core::app::source::Source,
     gitops::{AppSourceTarget, AppTarget, scan_app_inventory, scan_app_source_targets},
@@ -122,6 +122,7 @@ impl AuthVerifier {
         Ok(ApiAuthConfig {
             issuer,
             client_id: self.client_id.clone(),
+            audience: Some(self.audience.clone()),
             scopes: vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -152,13 +153,18 @@ impl AuthVerifier {
         );
         let id_token = CoreIdToken::from_str(&token)
             .map_err(|error| ApiError::unauthorized(error.to_string()))?;
+        let audience = self.audience.clone();
+        let verifier = client
+            .id_token_verifier()
+            .set_other_audience_verifier_fn(move |aud| **aud == audience);
         let claims = id_token
-            .claims(&client.id_token_verifier(), no_nonce)
+            .claims(&verifier, no_nonce)
             .map_err(|error| ApiError::unauthorized(error.to_string()))?;
 
-        if let Some(authorized_party) = claims.authorized_party()
-            && authorized_party.as_str() != self.client_id
-        {
+        let authorized_party = claims.authorized_party().ok_or_else(|| {
+            ApiError::unauthorized(format!("token authorized party must be {}", self.client_id))
+        })?;
+        if authorized_party.as_str() != self.client_id {
             return Err(ApiError::unauthorized(format!(
                 "token authorized party must be {} (found {})",
                 self.client_id,
@@ -496,7 +502,7 @@ async fn create_deployment(
         .split_once('/')
         .ok_or_else(|| ApiError::bad_request("repo must be in owner/name form"))?;
     let source_url = forgejo_clone_url(&state.config, &request.repo);
-    let workflow_id = push_workflow_id(repo_name, &request.revision);
+    let workflow_id = deploy_workflow_id(repo_name, &request.revision);
     let source = git_source(owner, repo_name, source_url, &request.revision);
     let input = push_to_deploy_input(
         &state.config,
@@ -577,7 +583,7 @@ async fn handle_gitea_webhook(
         return StatusCode::NO_CONTENT;
     }
 
-    let workflow_id = push_workflow_id(&repo_name, &revision);
+    let workflow_id = deploy_workflow_id(&repo_name, &revision);
     let input = push_to_deploy_input(
         &state.config,
         git_source(&owner, &repo_name, payload.repository.clone_url, &revision),
@@ -654,14 +660,6 @@ fn git_source(owner: &str, repo_name: &str, url: String, revision: &str) -> Sour
         revision: revision.to_string(),
         path: PathBuf::from(format!("/tmp/{}-{}", sanitize(repo_name), revision)),
     }
-}
-
-fn push_workflow_id(repo_name: &str, revision: &str) -> String {
-    format!(
-        "push-to-deploy-{}-{}",
-        sanitize(repo_name),
-        &revision[..revision.len().min(12)]
-    )
 }
 
 fn index_targets(targets: Vec<AppSourceTarget>) -> BTreeMap<(String, String), Vec<AppTarget>> {
