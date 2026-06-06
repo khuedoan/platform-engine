@@ -179,10 +179,10 @@ async fn set_commit_status(
             command_activity_options(Duration::from_secs(30)),
         )
         .await;
-    if let Err(error) = result {
-        if !ctx.is_replaying() {
-            warn!(error = %error, "failed to create Forgejo commit status");
-        }
+    if let Err(error) = result
+        && !ctx.is_replaying()
+    {
+        warn!(error = %error, "failed to create Forgejo commit status");
     }
 }
 

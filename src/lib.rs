@@ -1,5 +1,9 @@
 pub mod activities;
 pub mod api;
+pub mod cli;
 pub mod core;
+pub mod gitops;
+pub mod server;
 pub mod temporal;
+pub mod worker;
 pub mod workflows;

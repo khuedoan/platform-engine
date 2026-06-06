@@ -86,10 +86,11 @@ impl CreateAppRequest {
             );
         }
 
-        if let Some(deployment) = &self.deployment {
-            if deployment.image.is_none() && deployment.source_repo.is_none() {
-                return Err("deployment needs either an image or a source repo".to_string());
-            }
+        if let Some(deployment) = &self.deployment
+            && deployment.image.is_none()
+            && deployment.source_repo.is_none()
+        {
+            return Err("deployment needs either an image or a source repo".to_string());
         }
         for item in self.config.iter().chain(self.secrets.iter()) {
             validate_env_key(&item.key)?;
