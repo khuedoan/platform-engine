@@ -44,6 +44,14 @@ impl PlatformActivities {
     }
 
     #[activity]
+    pub async fn delete_gitops_app(
+        ctx: ActivityContext,
+        input: DeleteGitopsAppInput,
+    ) -> Result<DeleteGitopsAppResult, ActivityError> {
+        delete_gitops_app(ctx, input).await
+    }
+
+    #[activity]
     pub async fn enqueue_gitops_publish(
         ctx: ActivityContext,
         input: EnqueueGitopsPublishInput,

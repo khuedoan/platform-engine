@@ -63,6 +63,26 @@ pub struct CreateAppRequest {
     pub postgres: Option<CreatePostgres>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteAppRequest {
+    pub tenant: String,
+    pub project: String,
+    pub environment: String,
+}
+
+impl DeleteAppRequest {
+    pub fn app_path(&self) -> String {
+        format!("{}/{}/{}", self.tenant, self.project, self.environment)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        validate_dns_name("tenant", &self.tenant)?;
+        validate_dns_name("project", &self.project)?;
+        validate_dns_name("environment", &self.environment)?;
+        Ok(())
+    }
+}
+
 impl CreateAppRequest {
     pub fn app_path(&self) -> String {
         format!("{}/{}/{}", self.tenant, self.project, self.environment)
@@ -243,5 +263,17 @@ mod tests {
         });
 
         request.validate().unwrap();
+    }
+
+    #[test]
+    fn delete_app_request_validates_app_path() {
+        let request = DeleteAppRequest {
+            tenant: "test".to_string(),
+            project: "example".to_string(),
+            environment: "production".to_string(),
+        };
+
+        request.validate().unwrap();
+        assert_eq!(request.app_path(), "test/example/production");
     }
 }

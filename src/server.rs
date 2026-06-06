@@ -11,8 +11,8 @@ use std::{
 use crate::{
     activities::{ForgejoCommitStatusTarget, git_command_for_url},
     api::{
-        AuthConfig as ApiAuthConfig, CreateAppRequest, DeployRequest, ProjectSummary, UserInfo,
-        WorkflowStarted, WorkflowStatus,
+        AuthConfig as ApiAuthConfig, CreateAppRequest, DeleteAppRequest, DeployRequest,
+        ProjectSummary, UserInfo, WorkflowStarted, WorkflowStatus,
     },
     core::app::source::Source,
     gitops::{AppSourceTarget, AppTarget, scan_app_inventory, scan_app_source_targets},
@@ -26,7 +26,7 @@ use axum::{
     extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use openidconnect::{
     ClientId, IssuerUrl, Nonce,
@@ -376,6 +376,10 @@ pub async fn run() -> Result<()> {
         .route("/api/v1/me", get(me))
         .route("/api/v1/projects", get(list_projects))
         .route("/api/v1/apps", post(create_app))
+        .route(
+            "/api/v1/apps/{tenant}/{project}/{environment}",
+            delete(delete_app),
+        )
         .route("/api/v1/deployments", post(create_deployment))
         .route("/api/v1/workflows/{workflow_id}", get(workflow_status))
         .route("/webhooks/gitea", post(handle_gitea_webhook))
@@ -440,6 +444,35 @@ async fn create_app(
         &state.client,
         workflow_id.clone(),
         workflows::create_app::CreateAppInput {
+            gitops_url: state.config.gitops_url.clone(),
+            gitops_revision: state.config.gitops_revision.clone(),
+            registry: state.config.registry.clone(),
+            request,
+        },
+    )
+    .await
+    .map_err(ApiError::internal)?;
+
+    Ok(Json(WorkflowStarted { workflow_id }))
+}
+
+async fn delete_app(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((tenant, project, environment)): AxumPath<(String, String, String)>,
+) -> Result<Json<WorkflowStarted>, ApiError> {
+    state.auth.verify(&headers).await?;
+    let request = DeleteAppRequest {
+        tenant,
+        project,
+        environment,
+    };
+    request.validate().map_err(ApiError::bad_request)?;
+    let workflow_id = format!("delete-app-{}", sanitize(&request.app_path()));
+    workflows::start_delete_app_workflow(
+        &state.client,
+        workflow_id.clone(),
+        workflows::delete_app::DeleteAppInput {
             gitops_url: state.config.gitops_url.clone(),
             gitops_revision: state.config.gitops_revision.clone(),
             registry: state.config.registry.clone(),

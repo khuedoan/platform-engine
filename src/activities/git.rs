@@ -5,7 +5,7 @@ use super::{
     workspace::TempWorkspace,
 };
 use crate::{
-    api::CreateAppRequest,
+    api::{CreateAppRequest, DeleteAppRequest},
     core::app::image::Image,
     gitops::{
         AppImageUpdate, AppsBundle, UpdateAppVersionInput, scan_app_source_targets,
@@ -73,6 +73,21 @@ pub struct CreateGitopsAppInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateGitopsAppResult {
+    pub changed: bool,
+    pub commit_sha: Option<String>,
+    pub app_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteGitopsAppInput {
+    pub url: String,
+    pub revision: String,
+    pub registry: String,
+    pub request: DeleteAppRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteGitopsAppResult {
     pub changed: bool,
     pub commit_sha: Option<String>,
     pub app_path: String,
@@ -250,6 +265,72 @@ pub async fn create_gitops_app(
     push_apps_bundle(&ctx, &input.registry, &bundle).await?;
 
     Ok(CreateGitopsAppResult {
+        changed,
+        commit_sha,
+        app_path,
+    })
+}
+
+pub async fn delete_gitops_app(
+    ctx: ActivityContext,
+    input: DeleteGitopsAppInput,
+) -> Result<DeleteGitopsAppResult, ActivityError> {
+    if ctx.is_cancelled() {
+        return Err(ActivityError::cancelled());
+    }
+
+    input
+        .request
+        .validate()
+        .map_err(|error| ActivityError::from(anyhow!(error)))?;
+
+    let workspace = TempWorkspace::new("delete-app", &input.url, &input.revision);
+    clone_repo(&ctx, &input.url, &input.revision, workspace.path()).await?;
+    configure_git_user(&ctx, workspace.path()).await?;
+
+    let app_path = input.request.app_path();
+    let apps_dir = workspace.path().join("apps");
+    let app_dir = apps_dir
+        .join(&input.request.tenant)
+        .join(&input.request.project)
+        .join(&input.request.environment);
+
+    let removed = if app_dir.exists() {
+        fs::remove_dir_all(&app_dir)?;
+        true
+    } else {
+        false
+    };
+
+    let pathspec = format!("apps/{app_path}");
+    let changed = removed && git_has_changes(&ctx, workspace.path(), &pathspec).await?;
+    let commit_sha = if changed {
+        let commit_message = format!("chore(apps): delete {app_path}");
+        Some(
+            commit_and_push_gitops(
+                &ctx,
+                workspace.path(),
+                &input.url,
+                &input.revision,
+                &commit_message,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let bundle_workspace = TempWorkspace::new("apps-bundle", &input.url, &input.revision);
+    let bundle = write_apps_bundle(
+        bundle_workspace.path(),
+        &apps_dir,
+        APPS_REPOSITORY,
+        APPS_TAG,
+        &input.registry,
+    )?;
+    push_apps_bundle(&ctx, &input.registry, &bundle).await?;
+
+    Ok(DeleteGitopsAppResult {
         changed,
         commit_sha,
         app_path,

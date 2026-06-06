@@ -8,8 +8,8 @@ use std::{
 
 use crate::api::{
     AuthConfig, CreateAppRequest, CreateDeployment, CreateHttpRoute, CreatePostgres, CreateService,
-    CreateVolume, DeployRequest, KeyValue, ProjectSummary, UserInfo, WorkflowStarted,
-    WorkflowStatus,
+    CreateVolume, DeleteAppRequest, DeployRequest, KeyValue, ProjectSummary, UserInfo,
+    WorkflowStarted, WorkflowStatus,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
@@ -46,6 +46,7 @@ enum Commands {
     Whoami,
     List(ListArgs),
     Create(CreateArgs),
+    Delete(DeleteArgs),
     Deploy(DeployArgs),
     Status(StatusArgs),
     Open(OpenArgs),
@@ -91,6 +92,18 @@ struct CreateArgs {
     postgres: bool,
     #[arg(long, default_value = "1Gi")]
     postgres_size: String,
+    #[arg(long)]
+    watch: bool,
+}
+
+#[derive(Args)]
+struct DeleteArgs {
+    #[arg(long)]
+    tenant: String,
+    #[arg(long)]
+    project: String,
+    #[arg(long)]
+    environment: String,
     #[arg(long)]
     watch: bool,
 }
@@ -194,6 +207,20 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
+        Commands::Delete(args) => {
+            let (request, watch) = delete_request(args)?;
+            let api = ApiSession::load(&http, cli.server)?;
+            let path = format!(
+                "/api/v1/apps/{}/{}/{}",
+                request.tenant, request.project, request.environment
+            );
+            let started: WorkflowStarted = api.delete(&path).await?;
+            println!("{}", started.workflow_id);
+            if watch {
+                api.watch_workflow(&started.workflow_id).await?;
+            }
+            Ok(())
+        }
         Commands::Deploy(args) => {
             let watch = args.watch;
             let request = deploy_request(args)?;
@@ -254,6 +281,11 @@ impl<'a> ApiSession<'a> {
         B: Serialize,
     {
         self.request(Method::POST, path, Some(body)).await
+    }
+
+    async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.request(Method::DELETE, path, Option::<&()>::None)
+            .await
     }
 
     async fn request<T, B>(&self, method: Method, path: &str, body: Option<B>) -> Result<T>
@@ -467,6 +499,16 @@ fn deploy_request(args: DeployArgs) -> Result<DeployRequest> {
         },
         environment: args.environment,
     })
+}
+
+fn delete_request(args: DeleteArgs) -> Result<(DeleteAppRequest, bool)> {
+    let request = DeleteAppRequest {
+        tenant: args.tenant,
+        project: args.project,
+        environment: args.environment,
+    };
+    request.validate().map_err(anyhow::Error::msg)?;
+    Ok((request, args.watch))
 }
 
 fn print_workflow_status(status: &WorkflowStatus) {

@@ -2,8 +2,8 @@ use crate::{
     activities::UpdateGitopsImageInput,
     api::WorkflowStatus,
     workflows::{
-        create_app::CreateAppInput, forgejo_bootstrap::ForgejoBootstrapInput,
-        push_to_deploy::PushToDeployInput,
+        create_app::CreateAppInput, delete_app::DeleteAppInput,
+        forgejo_bootstrap::ForgejoBootstrapInput, push_to_deploy::PushToDeployInput,
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -32,6 +32,7 @@ use temporalio_common::{
 use tracing::{error, info, warn};
 
 pub mod create_app;
+pub mod delete_app;
 pub mod forgejo_bootstrap;
 pub mod gitops_publish;
 mod options;
@@ -62,6 +63,22 @@ pub async fn start_create_app_workflow(
     let result = client
         .start_workflow(
             create_app::CreateAppWorkflow::run,
+            input,
+            WorkflowStartOptions::new("main", id).build(),
+        )
+        .await;
+
+    handle_start_result(result.map(|_| ()))
+}
+
+pub async fn start_delete_app_workflow(
+    client: &Client,
+    id: String,
+    input: DeleteAppInput,
+) -> Result<()> {
+    let result = client
+        .start_workflow(
+            delete_app::DeleteAppWorkflow::run,
             input,
             WorkflowStartOptions::new("main", id).build(),
         )
