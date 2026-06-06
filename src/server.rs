@@ -147,7 +147,7 @@ impl AuthVerifier {
         .map_err(|error| ApiError::bad_gateway(error.to_string()))?;
         let client = CoreClient::from_provider_metadata(
             provider,
-            ClientId::new(self.audience.clone()),
+            ClientId::new(self.client_id.clone()),
             None,
         );
         let id_token = CoreIdToken::from_str(&token)
@@ -156,16 +156,14 @@ impl AuthVerifier {
             .claims(&client.id_token_verifier(), no_nonce)
             .map_err(|error| ApiError::unauthorized(error.to_string()))?;
 
-        match claims.authorized_party() {
-            Some(authorized_party) if authorized_party.as_str() == self.client_id => {}
-            Some(authorized_party) => {
-                return Err(ApiError::unauthorized(format!(
-                    "token authorized party must be {} (found {})",
-                    self.client_id,
-                    authorized_party.as_str()
-                )));
-            }
-            None => return Err(ApiError::unauthorized("token has no authorized party")),
+        if let Some(authorized_party) = claims.authorized_party()
+            && authorized_party.as_str() != self.client_id
+        {
+            return Err(ApiError::unauthorized(format!(
+                "token authorized party must be {} (found {})",
+                self.client_id,
+                authorized_party.as_str()
+            )));
         }
 
         Ok(UserInfo {
