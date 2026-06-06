@@ -12,7 +12,8 @@ pub(crate) fn write_create_app_manifests(
     request: &CreateAppRequest,
     registry: &str,
 ) -> anyhow::Result<usize> {
-    let mut count = 0;
+    write_json_manifest(&app_dir.join("namespace.yaml"), namespace_manifest(request))?;
+    let mut count = 1;
 
     if let Some(deployment) = &request.deployment {
         write_json_manifest(
@@ -67,6 +68,17 @@ pub(crate) fn write_create_app_manifests(
     Ok(count)
 }
 
+fn namespace_manifest(request: &CreateAppRequest) -> JsonValue {
+    json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": request.app_path().replace('/', "-"),
+            "labels": { "istio.io/dataplane-mode": "ambient" },
+        },
+    })
+}
+
 fn deployment_manifest(
     request: &CreateAppRequest,
     deployment: &CreateDeployment,
@@ -119,10 +131,7 @@ fn deployment_manifest(
             "selector": { "matchLabels": label },
             "template": {
                 "metadata": {
-                    "labels": {
-                        "app.kubernetes.io/name": &request.project,
-                        "istio.io/dataplane-mode": "ambient",
-                    },
+                    "labels": { "app.kubernetes.io/name": &request.project },
                 },
                 "spec": { "containers": [container] },
             },

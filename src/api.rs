@@ -92,20 +92,6 @@ impl CreateAppRequest {
         validate_dns_name("tenant", &self.tenant)?;
         validate_dns_name("project", &self.project)?;
         validate_dns_name("environment", &self.environment)?;
-        if self.deployment.is_none()
-            && self.service.is_none()
-            && self.http_route.is_none()
-            && self.config.is_empty()
-            && self.secrets.is_empty()
-            && self.volumes.is_empty()
-            && self.postgres.is_none()
-        {
-            return Err(
-                "create app needs at least one resource; add --image/--source-repo, --service, --hostname, --config, --secret, --volume, or --postgres"
-                    .to_string(),
-            );
-        }
-
         if let Some(deployment) = &self.deployment
             && deployment.image.is_none()
             && deployment.source_repo.is_none()
@@ -246,10 +232,8 @@ mod tests {
     }
 
     #[test]
-    fn create_app_request_rejects_empty_resource_set() {
-        let error = empty_request().validate().unwrap_err();
-
-        assert!(error.contains("at least one resource"));
+    fn create_app_request_accepts_empty_resource_set() {
+        empty_request().validate().unwrap();
     }
 
     #[test]

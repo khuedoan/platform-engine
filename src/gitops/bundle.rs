@@ -1,6 +1,7 @@
 use super::manifest::{
-    child_dirs, is_kustomization, is_yaml_file, read_app_manifest, set_manifest_namespace,
-    validate_app_manifest, write_file, write_yaml_manifest,
+    child_dirs, is_kustomization, is_namespace_manifest, is_yaml_file, read_app_manifest,
+    set_manifest_namespace, validate_app_manifest, validate_app_namespace, write_file,
+    write_yaml_manifest,
 };
 use anyhow::anyhow;
 use std::{
@@ -44,7 +45,6 @@ pub(crate) fn write_apps_bundle(
                 let app = app_artifact(output_dir, repository, &app_env);
                 let manifest_count = copy_app_manifests(&environment_dir, &app.dir, &app.name)?;
                 if manifest_count > 0 {
-                    write_namespace(&app.dir, &app.name)?;
                     count += manifest_count;
                     apps.push(app);
                 }
@@ -75,6 +75,7 @@ fn copy_app_manifests(
     namespace: &str,
 ) -> anyhow::Result<usize> {
     let mut count = 0;
+    let mut found_namespace = false;
     for entry in fs::read_dir(source_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -96,9 +97,21 @@ fn copy_app_manifests(
 
         let mut manifest = read_app_manifest(&path)?;
         validate_app_manifest(&path, &manifest)?;
-        set_manifest_namespace(&mut manifest, namespace)?;
+        if is_namespace_manifest(&manifest) {
+            validate_app_namespace(&path, &manifest, namespace)?;
+            found_namespace = true;
+        } else {
+            set_manifest_namespace(&mut manifest, namespace)?;
+        }
         write_yaml_manifest(&output_dir.join(entry.file_name()), &manifest)?;
         count += 1;
+    }
+
+    if !found_namespace {
+        return Err(anyhow!(
+            "{}: missing namespace.yaml for app namespace {namespace}",
+            source_dir.display()
+        ));
     }
 
     Ok(count)
@@ -111,21 +124,6 @@ fn app_artifact(output_dir: &Path, repository: &str, app_env: &str) -> AppArtifa
         name,
         repository: format!("{repository}/{app_env}"),
     }
-}
-
-fn write_namespace(output_dir: &Path, name: &str) -> anyhow::Result<()> {
-    write_file(
-        &output_dir.join("namespace.yaml"),
-        &format!(
-            r#"apiVersion: v1
-kind: Namespace
-metadata:
-  name: {name}
-  labels:
-    istio.io/dataplane-mode: ambient
-"#
-        ),
-    )
 }
 
 fn write_root_bundle(
