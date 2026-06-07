@@ -492,4 +492,76 @@ metadata:
             vec!["Namespace/test-empty-production"]
         );
     }
+
+    #[test]
+    fn test_write_add_app_manifests_does_not_rewrite_namespace() {
+        let output = PathBuf::from("/tmp/test-cloudlab-add-app-manifests");
+        let _ = fs::remove_dir_all(&output);
+        fs::create_dir_all(&output).unwrap();
+
+        let create_request = CreateAppRequest {
+            tenant: "test".to_string(),
+            project: "example".to_string(),
+            environment: "production".to_string(),
+            force: false,
+            deployment: None,
+            service: None,
+            http_route: None,
+            config: Vec::new(),
+            secrets: Vec::new(),
+            volumes: Vec::new(),
+            postgres: None,
+        };
+
+        let app_dir = output.join("test/example/production");
+        fs::create_dir_all(&app_dir).unwrap();
+        write_create_app_manifests(
+            &app_dir,
+            &create_request,
+            "registry.registry.svc.cluster.local",
+        )
+        .unwrap();
+
+        let add_request = CreateAppRequest {
+            service: Some(CreateService { port: 3000 }),
+            http_route: Some(CreateHttpRoute {
+                hostname: "example.production.khuedoan.com".to_string(),
+                port: 3000,
+            }),
+            ..create_request
+        };
+        let count = write_add_app_manifests(
+            &app_dir,
+            &add_request,
+            "registry.registry.svc.cluster.local",
+        )
+        .unwrap();
+
+        assert_eq!(count, 2);
+        assert!(app_dir.join("namespace.yaml").exists());
+        assert!(app_dir.join("service-example.yaml").exists());
+        assert!(app_dir.join("httproute-example.yaml").exists());
+        assert!(!app_dir.join("deployment-example.yaml").exists());
+
+        let namespace = fs::read_to_string(app_dir.join("namespace.yaml")).unwrap();
+        assert!(namespace.contains("name: test-example-production"));
+
+        let inventory = scan_app_inventory(&output, "registry.registry.svc.cluster.local").unwrap();
+        assert_eq!(inventory.len(), 1);
+        assert!(
+            inventory[0]
+                .resources
+                .contains(&"Namespace/test-example-production".to_string())
+        );
+        assert!(
+            inventory[0]
+                .resources
+                .contains(&"Service/example".to_string())
+        );
+        assert!(
+            inventory[0]
+                .resources
+                .contains(&"HTTPRoute/example".to_string())
+        );
+    }
 }
