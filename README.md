@@ -29,27 +29,15 @@ netamos login
 netamos logout
 netamos whoami
 netamos list
-# TODO: Prompt/filter by tenant when that UX is added.
 
-# TODO: Prompt for missing create values instead of requiring every flag.
-netamos create \
-  --tenant khuedoan \
-  --project blog \
-  --environment production \
-  --source-repo khuedoan/blog \
-  --port 8080 \
-  --service \
-  --hostname www.khuedoan.com
+netamos create
 netamos delete --tenant khuedoan --project blog --environment production --watch
-netamos deploy --repo khuedoan/blog --revision HEAD --environment production --watch
+# TODO: add component for existing app environments.
+netamos add
 netamos status
 netamos status --commit HEAD --watch
-netamos open push-to-deploy-blog-<sha>
 
 # TODO: Implement repo workflows.
 netamos repo create
 netamos repo clone
-
-# TODO: add component for existing app environments.
-netamos add
 ```

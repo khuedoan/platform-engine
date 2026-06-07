@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, IsTerminal},
     path::PathBuf,
@@ -15,7 +15,7 @@ use crate::api::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use comfy_table::{Attribute, Cell, ContentArrangement, Table, presets::NOTHING};
-use inquire::Text;
+use inquire::{CustomType, MultiSelect, Select, Text};
 use openidconnect::{
     AdditionalProviderMetadata, AuthType, ClientId, DeviceAuthorizationUrl, IssuerUrl, Nonce,
     OAuth2TokenResponse, ProviderMetadata, RefreshToken, Scope, TokenResponse as OidcTokenResponse,
@@ -63,11 +63,11 @@ struct ListArgs {
 #[derive(Args)]
 struct CreateArgs {
     #[arg(long)]
-    tenant: String,
+    tenant: Option<String>,
     #[arg(long)]
-    project: String,
+    project: Option<String>,
     #[arg(long)]
-    environment: String,
+    environment: Option<String>,
     #[arg(long)]
     force: bool,
     #[arg(long)]
@@ -205,8 +205,18 @@ pub async fn run() -> Result<()> {
             Ok(())
         }
         Commands::Create(args) => {
-            let request = create_request(args)?;
-            let api = ApiSession::load(&http, cli.server).await?;
+            let (api, projects) = if create_needs_inventory(&args) {
+                let api = ApiSession::load(&http, cli.server.clone()).await?;
+                let projects = api.get("/api/v1/projects").await?;
+                (Some(api), projects)
+            } else {
+                (None, Vec::new())
+            };
+            let request = create_request(args, &projects)?;
+            let api = match api {
+                Some(api) => api,
+                None => ApiSession::load(&http, cli.server).await?,
+            };
             let started: WorkflowStarted = api.post("/api/v1/apps", &request).await?;
             println!("{}", started.workflow_id);
             api.watch_workflow(&started.workflow_id).await?;
@@ -482,12 +492,69 @@ async fn decode_api_response<T: DeserializeOwned>(response: reqwest::Response) -
     Err(anyhow!("request failed: {body}"))
 }
 
-fn create_request(args: CreateArgs) -> Result<CreateAppRequest> {
+fn create_needs_inventory(args: &CreateArgs) -> bool {
+    io::stdin().is_terminal() && (args.tenant.is_none() || args.project.is_none())
+}
+
+fn create_request(args: CreateArgs, projects: &[ProjectSummary]) -> Result<CreateAppRequest> {
+    let mut args = args;
     let _ = args.watch;
+    let tenant = prompt_tenant(args.tenant.take(), projects)?;
+    let project = prompt_project(args.project.take(), &tenant, projects)?;
+    let environment = prompt_required(args.environment.take(), "Environment", "--environment")?;
+    let components = if io::stdin().is_terminal() && !has_create_resource_flags(&args) {
+        prompt_create_components()?
+    } else {
+        Vec::new()
+    };
+    if components.contains(&"ConfigMap") {
+        args.config.push(prompt_text("Config KEY=VALUE", None)?);
+    }
+    if components.contains(&"Secret") {
+        args.secrets.push(prompt_text("Secret KEY=VALUE", None)?);
+    }
+    if components.contains(&"Volume") {
+        args.volumes
+            .push(prompt_text("Volume name:size:/mount/path", None)?);
+    }
+
+    let include_deployment = components.contains(&"Deployment")
+        || args.image.is_some()
+        || args.source_repo.is_some()
+        || args.port.is_some();
+    let include_service =
+        components.contains(&"Service") || components.contains(&"HTTPRoute") || args.service;
+    let include_route = components.contains(&"HTTPRoute") || args.hostname.is_some();
+    let include_postgres = components.contains(&"Postgres") || args.postgres;
+
+    if include_deployment {
+        prompt_deployment_source(&mut args)?;
+    }
+    if include_route && args.hostname.is_none() {
+        args.hostname = Some(prompt_text("Hostname", None)?);
+    }
+    let service_port = if include_service || include_route {
+        Some(prompt_port(args.port.or(args.route_port), "--port")?)
+    } else {
+        None
+    };
+    if include_deployment && args.port.is_none() {
+        args.port = service_port;
+    }
+    let postgres_size = if include_postgres {
+        Some(if components.contains(&"Postgres") {
+            prompt_text("Postgres size", Some(&args.postgres_size))?
+        } else {
+            args.postgres_size
+        })
+    } else {
+        None
+    };
     let config = parse_key_values(args.config)?;
     let secrets = parse_key_values(args.secrets)?;
     let volumes = parse_volumes(args.volumes)?;
-    let deployment = if args.image.is_some() || args.source_repo.is_some() || args.port.is_some() {
+
+    let deployment = if include_deployment {
         Some(CreateDeployment {
             image: args.image,
             source_repo: args.source_repo,
@@ -497,12 +564,9 @@ fn create_request(args: CreateArgs) -> Result<CreateAppRequest> {
     } else {
         None
     };
-    let service = if args.service || args.hostname.is_some() {
+    let service = if include_service || include_route {
         Some(CreateService {
-            port: args
-                .port
-                .or(args.route_port)
-                .context("--service needs --port")?,
+            port: service_port.context("--service needs --port")?,
         })
     } else {
         None
@@ -512,20 +576,19 @@ fn create_request(args: CreateArgs) -> Result<CreateAppRequest> {
             hostname,
             port: args
                 .route_port
+                .or(service_port)
                 .or(args.port)
                 .context("--hostname needs --port or --route-port")?,
         })
     } else {
         None
     };
-    let postgres = args.postgres.then_some(CreatePostgres {
-        size: args.postgres_size,
-    });
+    let postgres = postgres_size.map(|size| CreatePostgres { size });
 
     let request = CreateAppRequest {
-        tenant: args.tenant,
-        project: args.project,
-        environment: args.environment,
+        tenant,
+        project,
+        environment,
         force: args.force,
         deployment,
         service,
@@ -538,6 +601,156 @@ fn create_request(args: CreateArgs) -> Result<CreateAppRequest> {
     request.validate().map_err(anyhow::Error::msg)?;
 
     Ok(request)
+}
+
+fn has_create_resource_flags(args: &CreateArgs) -> bool {
+    args.image.is_some()
+        || args.source_repo.is_some()
+        || args.port.is_some()
+        || args.service
+        || args.hostname.is_some()
+        || args.route_port.is_some()
+        || !args.config.is_empty()
+        || !args.secrets.is_empty()
+        || !args.volumes.is_empty()
+        || args.postgres
+}
+
+fn prompt_create_components() -> Result<Vec<&'static str>> {
+    Ok(MultiSelect::new(
+        "Components",
+        vec![
+            "Deployment",
+            "Service",
+            "HTTPRoute",
+            "ConfigMap",
+            "Secret",
+            "Volume",
+            "Postgres",
+        ],
+    )
+    .prompt()?)
+}
+
+fn prompt_deployment_source(args: &mut CreateArgs) -> Result<()> {
+    if args.image.is_some() || args.source_repo.is_some() {
+        return Ok(());
+    }
+    ensure_interactive("--image or --source-repo")?;
+
+    match Select::new("Deployment source", vec!["Source repo", "Image"]).prompt()? {
+        "Source repo" => {
+            let default = repo_from_git_remote().ok();
+            args.source_repo = Some(prompt_text("Source repo", default.as_deref())?);
+        }
+        "Image" => {
+            args.image = Some(prompt_text("Image", None)?);
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(())
+}
+
+fn prompt_tenant(value: Option<String>, projects: &[ProjectSummary]) -> Result<String> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        Some(_) => bail!("--tenant cannot be empty"),
+        None => {
+            ensure_interactive("--tenant")?;
+            let tenants = projects
+                .iter()
+                .map(|project| project.tenant.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            prompt_existing_or_new("Tenant", tenants, "Create new tenant", "--tenant")
+        }
+    }
+}
+
+fn prompt_project(
+    value: Option<String>,
+    tenant: &str,
+    projects: &[ProjectSummary],
+) -> Result<String> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        Some(_) => bail!("--project cannot be empty"),
+        None => {
+            ensure_interactive("--project")?;
+            let projects = projects
+                .iter()
+                .filter(|project| project.tenant == tenant)
+                .map(|project| project.project.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            prompt_existing_or_new("Project", projects, "Create new project", "--project")
+        }
+    }
+}
+
+fn prompt_existing_or_new(
+    prompt: &str,
+    mut values: Vec<String>,
+    create_new: &'static str,
+    flag: &str,
+) -> Result<String> {
+    if values.is_empty() {
+        return prompt_text(prompt, None);
+    }
+
+    values.push(create_new.to_string());
+    let choice = Select::new(prompt, values).prompt()?;
+    if choice == create_new {
+        prompt_text(prompt, None)
+    } else if choice.trim().is_empty() {
+        bail!("{flag} cannot be empty");
+    } else {
+        Ok(choice)
+    }
+}
+
+fn prompt_required(value: Option<String>, prompt: &str, flag: &str) -> Result<String> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        Some(_) => bail!("{flag} cannot be empty"),
+        None => {
+            ensure_interactive(flag)?;
+            prompt_text(prompt, None)
+        }
+    }
+}
+
+fn prompt_text(prompt: &str, default: Option<&str>) -> Result<String> {
+    let mut text = Text::new(prompt);
+    if let Some(default) = default {
+        text = text.with_default(default);
+    }
+    let value = text.prompt()?;
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{prompt} is required");
+    }
+    Ok(value.to_string())
+}
+
+fn prompt_port(value: Option<u16>, flag: &str) -> Result<u16> {
+    if let Some(value) = value {
+        return Ok(value);
+    }
+    ensure_interactive(flag)?;
+    Ok(CustomType::<u16>::new("Port").prompt()?)
+}
+
+fn ensure_interactive(flag: &str) -> Result<()> {
+    if !io::stdin().is_terminal() {
+        bail!("set {flag} or run interactively");
+    }
+    Ok(())
 }
 
 fn deploy_request(args: DeployArgs) -> Result<DeployRequest> {
