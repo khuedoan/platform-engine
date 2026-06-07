@@ -15,7 +15,10 @@ use crate::{
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, env, fs, path::Path};
-use temporalio_sdk::activities::{ActivityContext, ActivityError};
+use temporalio_sdk::{
+    ApplicationFailure,
+    activities::{ActivityContext, ActivityError},
+};
 use tokio::{fs::remove_dir_all, process::Command};
 use tracing::info;
 
@@ -23,6 +26,10 @@ pub use crate::gitops::AppTarget;
 
 const APPS_REPOSITORY: &str = "apps";
 const APPS_TAG: &str = "latest";
+
+fn non_retryable_error(error: anyhow::Error) -> ActivityError {
+    ActivityError::application(ApplicationFailure::non_retryable(error))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateGitopsImageInput {
@@ -212,7 +219,7 @@ pub async fn create_gitops_app(
     input
         .request
         .validate()
-        .map_err(|error| ActivityError::from(anyhow!(error)))?;
+        .map_err(|error| non_retryable_error(anyhow!(error)))?;
 
     let workspace = TempWorkspace::new("create-app", &input.url, &input.revision);
     clone_repo(&ctx, &input.url, &input.revision, workspace.path()).await?;
@@ -227,7 +234,7 @@ pub async fn create_gitops_app(
 
     if app_dir.exists() {
         if !input.request.force {
-            return Err(ActivityError::from(anyhow!(
+            return Err(non_retryable_error(anyhow!(
                 "apps/{app_path} already exists; pass force to replace it"
             )));
         }
@@ -282,7 +289,7 @@ pub async fn delete_gitops_app(
     input
         .request
         .validate()
-        .map_err(|error| ActivityError::from(anyhow!(error)))?;
+        .map_err(|error| non_retryable_error(anyhow!(error)))?;
 
     let workspace = TempWorkspace::new("delete-app", &input.url, &input.revision);
     clone_repo(&ctx, &input.url, &input.revision, workspace.path()).await?;

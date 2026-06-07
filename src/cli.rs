@@ -92,7 +92,7 @@ struct CreateArgs {
     postgres: bool,
     #[arg(long, default_value = "1Gi")]
     postgres_size: String,
-    #[arg(long)]
+    #[arg(long = "watch", hide = true)]
     watch: bool,
 }
 
@@ -203,13 +203,11 @@ pub async fn run() -> Result<()> {
             Ok(())
         }
         Commands::Create(args) => {
-            let (request, watch) = create_request(args)?;
+            let request = create_request(args)?;
             let api = ApiSession::load(&http, cli.server).await?;
             let started: WorkflowStarted = api.post("/api/v1/apps", &request).await?;
             println!("{}", started.workflow_id);
-            if watch {
-                api.watch_workflow(&started.workflow_id).await?;
-            }
+            api.watch_workflow(&started.workflow_id).await?;
             Ok(())
         }
         Commands::Delete(args) => {
@@ -468,7 +466,8 @@ async fn decode_api_response<T: DeserializeOwned>(response: reqwest::Response) -
     Err(anyhow!("request failed: {body}"))
 }
 
-fn create_request(args: CreateArgs) -> Result<(CreateAppRequest, bool)> {
+fn create_request(args: CreateArgs) -> Result<CreateAppRequest> {
+    let _ = args.watch;
     let config = parse_key_values(args.config)?;
     let secrets = parse_key_values(args.secrets)?;
     let volumes = parse_volumes(args.volumes)?;
@@ -522,7 +521,7 @@ fn create_request(args: CreateArgs) -> Result<(CreateAppRequest, bool)> {
     };
     request.validate().map_err(anyhow::Error::msg)?;
 
-    Ok((request, args.watch))
+    Ok(request)
 }
 
 fn deploy_request(args: DeployArgs) -> Result<DeployRequest> {

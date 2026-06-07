@@ -8,7 +8,7 @@ use crate::activities::{
 };
 use serde::{Deserialize, Serialize};
 use temporalio_macros::{workflow, workflow_methods};
-use temporalio_sdk::{ActivityOptions, WorkflowContext, WorkflowContextView, WorkflowResult};
+use temporalio_sdk::{WorkflowContext, WorkflowContextView, WorkflowResult};
 use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +82,7 @@ impl ForgejoBootstrapWorkflow {
                 username: input.bot_username.clone(),
                 email: input.bot_email.clone(),
             },
-            ActivityOptions::start_to_close_timeout(Duration::from_secs(60)),
+            command_activity_options(Duration::from_secs(60)),
         )
         .await?;
 
@@ -93,7 +93,7 @@ impl ForgejoBootstrapWorkflow {
                 repo: input.gitops_repo.clone(),
                 private: false,
             },
-            ActivityOptions::start_to_close_timeout(Duration::from_secs(60)),
+            command_activity_options(Duration::from_secs(60)),
         )
         .await?;
 
@@ -105,7 +105,7 @@ impl ForgejoBootstrapWorkflow {
                 username: input.bot_username.clone(),
                 permission: "write".to_string(),
             },
-            ActivityOptions::start_to_close_timeout(Duration::from_secs(60)),
+            command_activity_options(Duration::from_secs(60)),
         )
         .await?;
 
@@ -116,7 +116,7 @@ impl ForgejoBootstrapWorkflow {
                 webhook_url: input.webhook_url.clone(),
                 legacy_webhook_url: input.legacy_webhook_url.clone(),
             },
-            ActivityOptions::start_to_close_timeout(Duration::from_secs(60)),
+            command_activity_options(Duration::from_secs(60)),
         )
         .await?;
 
@@ -158,7 +158,7 @@ impl ForgejoBootstrapWorkflow {
                     webhook_url: input.webhook_url.clone(),
                     legacy_webhook_url: input.legacy_webhook_url.clone(),
                 },
-                ActivityOptions::start_to_close_timeout(Duration::from_secs(60)),
+                command_activity_options(Duration::from_secs(60)),
             )
             .await?;
         }
