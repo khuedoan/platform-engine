@@ -5,7 +5,7 @@ mod manifest;
 mod update;
 
 pub(crate) use bundle::{AppsBundle, write_apps_bundle};
-pub(crate) use create::write_create_app_manifests;
+pub(crate) use create::{write_add_app_manifests, write_create_app_manifests};
 #[cfg(test)]
 use inventory::source_repo_from_image;
 pub use inventory::{scan_app_inventory, scan_app_source_targets};

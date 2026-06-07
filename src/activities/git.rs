@@ -9,7 +9,8 @@ use crate::{
     core::app::image::Image,
     gitops::{
         AppImageUpdate, AppsBundle, UpdateAppVersionInput, scan_app_source_targets,
-        update_app_version_inner, write_apps_bundle, write_create_app_manifests,
+        update_app_version_inner, write_add_app_manifests, write_apps_bundle,
+        write_create_app_manifests,
     },
 };
 use anyhow::anyhow;
@@ -80,6 +81,21 @@ pub struct CreateGitopsAppInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateGitopsAppResult {
+    pub changed: bool,
+    pub commit_sha: Option<String>,
+    pub app_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddGitopsAppInput {
+    pub url: String,
+    pub revision: String,
+    pub registry: String,
+    pub request: CreateAppRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddGitopsAppResult {
     pub changed: bool,
     pub commit_sha: Option<String>,
     pub app_path: String,
@@ -272,6 +288,77 @@ pub async fn create_gitops_app(
     push_apps_bundle(&ctx, &input.registry, &bundle).await?;
 
     Ok(CreateGitopsAppResult {
+        changed,
+        commit_sha,
+        app_path,
+    })
+}
+
+pub async fn add_gitops_app(
+    ctx: ActivityContext,
+    input: AddGitopsAppInput,
+) -> Result<AddGitopsAppResult, ActivityError> {
+    if ctx.is_cancelled() {
+        return Err(ActivityError::cancelled());
+    }
+
+    input
+        .request
+        .validate()
+        .map_err(|error| non_retryable_error(anyhow!(error)))?;
+    if !input.request.has_components() {
+        return Err(non_retryable_error(anyhow!(
+            "add needs at least one component"
+        )));
+    }
+
+    let workspace = TempWorkspace::new("add-app", &input.url, &input.revision);
+    clone_repo(&ctx, &input.url, &input.revision, workspace.path()).await?;
+    configure_git_user(&ctx, workspace.path()).await?;
+
+    let app_path = input.request.app_path();
+    let apps_dir = workspace.path().join("apps");
+    let app_dir = apps_dir
+        .join(&input.request.tenant)
+        .join(&input.request.project)
+        .join(&input.request.environment);
+
+    if !app_dir.exists() {
+        return Err(non_retryable_error(anyhow!(
+            "apps/{app_path} does not exist; create it first"
+        )));
+    }
+    write_add_app_manifests(&app_dir, &input.request, &input.registry)?;
+
+    let pathspec = format!("apps/{app_path}");
+    let changed = git_has_changes(&ctx, workspace.path(), &pathspec).await?;
+    let commit_sha = if changed {
+        let commit_message = format!("feat(apps): add components to {app_path}");
+        Some(
+            commit_and_push_gitops(
+                &ctx,
+                workspace.path(),
+                &input.url,
+                &input.revision,
+                &commit_message,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let bundle_workspace = TempWorkspace::new("apps-bundle", &input.url, &input.revision);
+    let bundle = write_apps_bundle(
+        bundle_workspace.path(),
+        &apps_dir,
+        APPS_REPOSITORY,
+        APPS_TAG,
+        &input.registry,
+    )?;
+    push_apps_bundle(&ctx, &input.registry, &bundle).await?;
+
+    Ok(AddGitopsAppResult {
         changed,
         commit_sha,
         app_path,

@@ -12,8 +12,28 @@ pub(crate) fn write_create_app_manifests(
     request: &CreateAppRequest,
     registry: &str,
 ) -> anyhow::Result<usize> {
-    write_json_manifest(&app_dir.join("namespace.yaml"), namespace_manifest(request))?;
-    let mut count = 1;
+    write_app_manifests(app_dir, request, registry, true)
+}
+
+pub(crate) fn write_add_app_manifests(
+    app_dir: &Path,
+    request: &CreateAppRequest,
+    registry: &str,
+) -> anyhow::Result<usize> {
+    write_app_manifests(app_dir, request, registry, false)
+}
+
+fn write_app_manifests(
+    app_dir: &Path,
+    request: &CreateAppRequest,
+    registry: &str,
+    include_namespace: bool,
+) -> anyhow::Result<usize> {
+    let mut count = 0;
+    if include_namespace {
+        write_json_manifest(&app_dir.join("namespace.yaml"), namespace_manifest(request))?;
+        count += 1;
+    }
 
     if let Some(deployment) = &request.deployment {
         write_json_manifest(

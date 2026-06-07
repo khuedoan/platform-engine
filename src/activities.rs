@@ -44,6 +44,14 @@ impl PlatformActivities {
     }
 
     #[activity]
+    pub async fn add_gitops_app(
+        ctx: ActivityContext,
+        input: AddGitopsAppInput,
+    ) -> Result<AddGitopsAppResult, ActivityError> {
+        add_gitops_app(ctx, input).await
+    }
+
+    #[activity]
     pub async fn delete_gitops_app(
         ctx: ActivityContext,
         input: DeleteGitopsAppInput,

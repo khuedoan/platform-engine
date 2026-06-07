@@ -49,6 +49,7 @@ enum Commands {
     List(ListArgs),
     Create(CreateArgs),
     Delete(DeleteArgs),
+    Add(AddArgs),
     Deploy(DeployArgs),
     Status(StatusArgs),
     Open(OpenArgs),
@@ -108,6 +109,40 @@ struct DeleteArgs {
     environment: String,
     #[arg(long)]
     watch: bool,
+}
+
+#[derive(Args)]
+struct AddArgs {
+    #[arg(long)]
+    tenant: Option<String>,
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long)]
+    environment: Option<String>,
+    #[arg(long)]
+    image: Option<String>,
+    #[arg(long)]
+    source_repo: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    replicas: u32,
+    #[arg(long)]
+    port: Option<u16>,
+    #[arg(long)]
+    service: bool,
+    #[arg(long)]
+    hostname: Option<String>,
+    #[arg(long)]
+    route_port: Option<u16>,
+    #[arg(long = "config")]
+    config: Vec<String>,
+    #[arg(long = "secret")]
+    secrets: Vec<String>,
+    #[arg(long = "volume")]
+    volumes: Vec<String>,
+    #[arg(long)]
+    postgres: bool,
+    #[arg(long, default_value = "1Gi")]
+    postgres_size: String,
 }
 
 #[derive(Args)]
@@ -236,6 +271,28 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
+        Commands::Add(args) => {
+            let (api, projects) = if add_needs_inventory(&args) {
+                let api = ApiSession::load(&http, cli.server.clone()).await?;
+                let projects = api.get("/api/v1/projects").await?;
+                (Some(api), projects)
+            } else {
+                (None, Vec::new())
+            };
+            let request = add_request(args, &projects)?;
+            let api = match api {
+                Some(api) => api,
+                None => ApiSession::load(&http, cli.server).await?,
+            };
+            let path = format!(
+                "/api/v1/apps/{}/{}/{}",
+                request.tenant, request.project, request.environment
+            );
+            let started: WorkflowStarted = api.patch(&path, &request).await?;
+            println!("{}", started.workflow_id);
+            api.watch_workflow(&started.workflow_id).await?;
+            Ok(())
+        }
         Commands::Deploy(args) => {
             let watch = args.watch;
             let request = deploy_request(args)?;
@@ -300,6 +357,14 @@ impl<'a> ApiSession<'a> {
         B: Serialize,
     {
         self.request(Method::POST, path, Some(body)).await
+    }
+
+    async fn patch<T, B>(&self, path: &str, body: &B) -> Result<T>
+    where
+        T: DeserializeOwned,
+        B: Serialize,
+    {
+        self.request(Method::PATCH, path, Some(body)).await
     }
 
     async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -496,12 +561,62 @@ fn create_needs_inventory(args: &CreateArgs) -> bool {
     io::stdin().is_terminal() && (args.tenant.is_none() || args.project.is_none())
 }
 
+fn add_needs_inventory(args: &AddArgs) -> bool {
+    io::stdin().is_terminal()
+        && (args.tenant.is_none() || args.project.is_none() || args.environment.is_none())
+}
+
 fn create_request(args: CreateArgs, projects: &[ProjectSummary]) -> Result<CreateAppRequest> {
     let mut args = args;
     let _ = args.watch;
-    let tenant = prompt_tenant(args.tenant.take(), projects)?;
-    let project = prompt_project(args.project.take(), &tenant, projects)?;
+    let tenant = prompt_tenant(args.tenant.take(), projects, true)?;
+    let project = prompt_project(args.project.take(), &tenant, projects, true)?;
     let environment = prompt_required(args.environment.take(), "Environment", "--environment")?;
+    component_request(args, tenant, project, environment)
+}
+
+fn add_request(args: AddArgs, projects: &[ProjectSummary]) -> Result<CreateAppRequest> {
+    let mut args = args.into_create_args();
+    let tenant = prompt_tenant(args.tenant.take(), projects, false)?;
+    let project = prompt_project(args.project.take(), &tenant, projects, false)?;
+    let environment = prompt_environment(args.environment.take(), &tenant, &project, projects)?;
+    let request = component_request(args, tenant, project, environment)?;
+    if !request.has_components() {
+        bail!("add needs at least one component");
+    }
+    Ok(request)
+}
+
+impl AddArgs {
+    fn into_create_args(self) -> CreateArgs {
+        CreateArgs {
+            tenant: self.tenant,
+            project: self.project,
+            environment: self.environment,
+            force: false,
+            image: self.image,
+            source_repo: self.source_repo,
+            replicas: self.replicas,
+            port: self.port,
+            service: self.service,
+            hostname: self.hostname,
+            route_port: self.route_port,
+            config: self.config,
+            secrets: self.secrets,
+            volumes: self.volumes,
+            postgres: self.postgres,
+            postgres_size: self.postgres_size,
+            watch: false,
+        }
+    }
+}
+
+fn component_request(
+    mut args: CreateArgs,
+    tenant: String,
+    project: String,
+    environment: String,
+) -> Result<CreateAppRequest> {
     let components = if io::stdin().is_terminal() && !has_create_resource_flags(&args) {
         prompt_create_components()?
     } else {
@@ -652,7 +767,11 @@ fn prompt_deployment_source(args: &mut CreateArgs) -> Result<()> {
     Ok(())
 }
 
-fn prompt_tenant(value: Option<String>, projects: &[ProjectSummary]) -> Result<String> {
+fn prompt_tenant(
+    value: Option<String>,
+    projects: &[ProjectSummary],
+    allow_new: bool,
+) -> Result<String> {
     match value {
         Some(value) if !value.trim().is_empty() => Ok(value),
         Some(_) => bail!("--tenant cannot be empty"),
@@ -665,7 +784,11 @@ fn prompt_tenant(value: Option<String>, projects: &[ProjectSummary]) -> Result<S
                 .into_iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
-            prompt_existing_or_new("Tenant", tenants, "Create new tenant", "--tenant")
+            if allow_new {
+                prompt_existing_or_new("Tenant", tenants, "Create new tenant", "--tenant")
+            } else {
+                prompt_existing("Tenant", tenants, "--tenant")
+            }
         }
     }
 }
@@ -674,6 +797,7 @@ fn prompt_project(
     value: Option<String>,
     tenant: &str,
     projects: &[ProjectSummary],
+    allow_new: bool,
 ) -> Result<String> {
     match value {
         Some(value) if !value.trim().is_empty() => Ok(value),
@@ -688,9 +812,48 @@ fn prompt_project(
                 .into_iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
-            prompt_existing_or_new("Project", projects, "Create new project", "--project")
+            if allow_new {
+                prompt_existing_or_new("Project", projects, "Create new project", "--project")
+            } else {
+                prompt_existing("Project", projects, "--project")
+            }
         }
     }
+}
+
+fn prompt_environment(
+    value: Option<String>,
+    tenant: &str,
+    project: &str,
+    projects: &[ProjectSummary],
+) -> Result<String> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        Some(_) => bail!("--environment cannot be empty"),
+        None => {
+            ensure_interactive("--environment")?;
+            let environments = projects
+                .iter()
+                .filter(|app| app.tenant == tenant && app.project == project)
+                .map(|app| app.environment.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            prompt_existing("Environment", environments, "--environment")
+        }
+    }
+}
+
+fn prompt_existing(prompt: &str, values: Vec<String>, flag: &str) -> Result<String> {
+    if values.is_empty() {
+        bail!("no existing {prompt}; set {flag} or create the app first");
+    }
+    let choice = Select::new(prompt, values).prompt()?;
+    if choice.trim().is_empty() {
+        bail!("{flag} cannot be empty");
+    }
+    Ok(choice)
 }
 
 fn prompt_existing_or_new(

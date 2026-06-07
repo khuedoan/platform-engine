@@ -32,7 +32,6 @@ netamos list
 
 netamos create
 netamos delete --tenant khuedoan --project blog --environment production --watch
-# TODO: add component for existing app environments.
 netamos add
 netamos status
 netamos status --commit HEAD --watch

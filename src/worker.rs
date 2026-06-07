@@ -36,6 +36,7 @@ pub async fn run() -> Result<()> {
                 .build()
         }
         _ => worker_options
+            .register_workflow::<workflows::add_app::AddAppWorkflow>()
             .register_workflow::<workflows::create_app::CreateAppWorkflow>()
             .register_workflow::<workflows::delete_app::DeleteAppWorkflow>()
             .register_workflow::<workflows::push_to_deploy::PushToDeployWorkflow>()

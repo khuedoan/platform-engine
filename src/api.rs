@@ -90,6 +90,16 @@ impl CreateAppRequest {
         format!("{}/{}/{}", self.tenant, self.project, self.environment)
     }
 
+    pub fn has_components(&self) -> bool {
+        self.deployment.is_some()
+            || self.service.is_some()
+            || self.http_route.is_some()
+            || !self.config.is_empty()
+            || !self.secrets.is_empty()
+            || !self.volumes.is_empty()
+            || self.postgres.is_some()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         validate_dns_name("tenant", &self.tenant)?;
         validate_dns_name("project", &self.project)?;
