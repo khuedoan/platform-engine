@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::{self, IsTerminal},
     path::PathBuf,
     process::Command as ProcessCommand,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -14,6 +15,7 @@ use crate::api::{
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use comfy_table::{Attribute, Cell, ContentArrangement, Table, presets::NOTHING};
+use inquire::Text;
 use openidconnect::{
     AdditionalProviderMetadata, AuthType, ClientId, DeviceAuthorizationUrl, IssuerUrl, Nonce,
     OAuth2TokenResponse, ProviderMetadata, RefreshToken, Scope, TokenResponse as OidcTokenResponse,
@@ -345,11 +347,7 @@ impl<'a> ApiSession<'a> {
 
 async fn login(http: &Client, server: Option<String>) -> Result<()> {
     let mut credentials = load_credentials()?;
-    let server = normalize_server(
-        server
-            .or(credentials.default_server.clone())
-            .context("set --server or NETAMOS_URL for the first login")?,
-    );
+    let server = login_server(server, credentials.default_server.clone())?;
     let auth: AuthConfig = public_api(http, &server, "/api/v1/auth/config").await?;
     let trusted_audience = auth
         .audience
@@ -410,6 +408,24 @@ async fn login(http: &Client, server: Option<String>) -> Result<()> {
     );
     save_credentials(&credentials)?;
     Ok(())
+}
+
+fn login_server(server: Option<String>, default_server: Option<String>) -> Result<String> {
+    if let Some(server) = server.or(default_server) {
+        return Ok(normalize_server(server));
+    }
+
+    if !io::stdin().is_terminal() {
+        bail!("set --server or NETAMOS_URL for non-interactive login");
+    }
+
+    let server = Text::new("Server URL").prompt()?;
+    let server = server.trim();
+    if server.is_empty() {
+        bail!("server URL is required");
+    }
+
+    Ok(normalize_server(server.to_string()))
 }
 
 fn oidc_http_client() -> Result<oidc_reqwest::Client> {

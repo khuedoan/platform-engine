@@ -14,7 +14,7 @@ CLI talk to the server, they don't mutate GitOps state locally, server do the ac
 Login:
 
 ```sh
-netamos
+netamos login
 
 # or explicitly set the server URL
 netamos --server https://netamos.production.khuedoan.com login
